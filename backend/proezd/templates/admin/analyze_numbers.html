@@ -1,0 +1,181 @@
+{% extends "admin/base_site.html" %}
+{% load static %}
+
+{% block content %}
+<div class="module">
+    <h2>Анализ и замена номеров</h2>
+    
+    {% csrf_token %}
+    
+    <div id="results-container" style="margin-top: 20px;">
+        <div id="loading" style="display: none;">
+            <p>Идет анализ номеров...</p>
+        </div>
+        
+        <div id="error" style="display: none; color: red; margin: 10px 0;"></div>
+        
+        <table id="results-table" style="display: none; width: 100%; margin-top: 20px;">
+            <thead>
+                <tr>
+                    <th>Дата</th>
+                    <th>Текущий номер</th>
+                    <th>Предлагаемый номер</th>
+                    <th style="cursor: pointer;" id="similarity-header">
+                        Схожесть
+                        <span id="sort-indicator">▼</span>
+                    </th>
+                    <th>Выбрать</th>
+                </tr>
+            </thead>
+            <tbody></tbody>
+        </table>
+        
+        <button id="replace-selected" style="display: none; margin-top: 20px;" class="button">
+            Заменить выбранные номера
+        </button>
+    </div>
+</div>
+
+<script>
+document.addEventListener('DOMContentLoaded', function() {
+    const loadingEl = document.getElementById('loading');
+    const errorEl = document.getElementById('error');
+    const tableEl = document.getElementById('results-table');
+    const replaceBtn = document.getElementById('replace-selected');
+    const tbody = tableEl.querySelector('tbody');
+    const csrfToken = document.querySelector('[name=csrfmiddlewaretoken]').value;
+    let sortAscending = false; // По умолчанию сортируем по убыванию
+    
+    // Функция для загрузки данных с сервера
+    function loadData(isSort = false) {
+        loadingEl.style.display = 'block';
+        errorEl.style.display = 'none';
+        
+        // Формируем URL в зависимости от типа запроса
+        const url = isSort ? `?sort=true&sort_ascending=${sortAscending}` : '';
+        
+        fetch(url, {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+                'X-CSRFToken': csrfToken
+            },
+            credentials: 'same-origin'
+        })
+        .then(response => {
+            if (!response.ok) {
+                throw new Error(`HTTP error! status: ${response.status}`);
+            }
+            return response.json();
+        })
+        .then(data => {
+            loadingEl.style.display = 'none';
+            
+            if (data.error) {
+                errorEl.textContent = 'Ошибка: ' + data.error;
+                errorEl.style.display = 'block';
+                return;
+            }
+            
+            if (data.results && data.results.length > 0) {
+                tbody.innerHTML = '';
+                data.results.forEach(result => {
+                    const row = document.createElement('tr');
+                    row.innerHTML = `
+                        <td>${result.dt}</td>
+                        <td>${result.original}</td>
+                        <td>${result.suggested}</td>
+                        <td>${result.similarity}</td>
+                        <td>
+                            <input type="checkbox" data-id="${result.id}" 
+                                   data-original="${result.original}" 
+                                   data-suggested="${result.suggested}">
+                        </td>
+                    `;
+                    tbody.appendChild(row);
+                });
+                tableEl.style.display = 'table';
+                replaceBtn.style.display = 'block';
+            } else {
+                errorEl.textContent = 'Нет номеров для замены';
+                errorEl.style.display = 'block';
+            }
+        })
+        .catch(error => {
+            loadingEl.style.display = 'none';
+            console.error('Ошибка:', error);
+            errorEl.textContent = 'Ошибка при загрузке данных: ' + error.message;
+            errorEl.style.display = 'block';
+        });
+    }
+    
+    // Обработчик клика по заголовку "Схожесть"
+    document.getElementById('similarity-header').addEventListener('click', function() {
+        sortAscending = !sortAscending;
+        document.getElementById('sort-indicator').textContent = sortAscending ? '▲' : '▼';
+        loadData(true); // Передаем true для указания, что это запрос сортировки
+    });
+    
+    // Загружаем данные при загрузке страницы
+    loadData(false);
+    
+    // Обработка нажатия на кнопку замены
+    replaceBtn.addEventListener('click', function() {
+        const selected = Array.from(document.querySelectorAll('input[type="checkbox"]:checked'))
+            .map(cb => ({
+                id: cb.dataset.id,
+                original: cb.dataset.original,
+                suggested: cb.dataset.suggested
+            }));
+            
+        if (selected.length === 0) {
+            alert('Выберите номера для замены');
+            return;
+        }
+        
+        if (!confirm(`Вы уверены, что хотите заменить ${selected.length} номеров?`)) {
+            return;
+        }
+        
+        loadingEl.style.display = 'block';
+        replaceBtn.disabled = true;
+        
+        fetch('../replace-numbers/', {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+                'X-CSRFToken': csrfToken
+            },
+            body: JSON.stringify({
+                replacements: selected
+            })
+        })
+        .then(response => {
+            if (!response.ok) {
+                throw new Error(`HTTP error! status: ${response.status}`);
+            }
+            return response.json();
+        })
+        .then(data => {
+            loadingEl.style.display = 'none';
+            replaceBtn.disabled = false;
+            
+            if (data.error) {
+                errorEl.textContent = 'Ошибка: ' + data.error;
+                errorEl.style.display = 'block';
+            } else {
+                alert(data.message);
+                location.reload();
+            }
+        })
+        .catch(error => {
+            loadingEl.style.display = 'none';
+            replaceBtn.disabled = false;
+            console.error('Ошибка:', error);
+            errorEl.textContent = 'Ошибка при замене номеров: ' + error.message;
+            errorEl.style.display = 'block';
+        });
+    });
+});
+</script>
+{% endblock %} 

@@ -1,0 +1,70 @@
+<!DOCTYPE html>
+<html lang="ru">
+	<head>
+		<meta
+			http-equiv="Content-Type"
+			content="text/html;charset=utf-8"
+		/>
+		<title>Сервис временно недоступен...</title>
+		<style type="text/css">
+			* {
+			    box-sizing: border-box;
+			}
+			html,
+			body {
+			    height: 100%;
+			    margin: 0;
+			}
+			main {
+			    height: 100%;
+			    margin: 0 auto;
+			    max-width: 800px;
+			    padding: 30px;
+			    display: table;
+			    text-align: center;
+			}
+			main > * {
+			    display: table-cell;
+			    vertical-align: top;
+			}
+
+			body {
+			    font: 20px Roboto Condensed, Helvetica, sans-serif;
+			    color: #333;
+			}
+			@keyframes blink {
+			    50% {
+			        color: transparent;
+			    }
+			}
+			.dot {
+			    animation: 1s blink infinite;
+			}
+			.dot:nth-child(2) {
+			    animation-delay: 250ms;
+			}
+			.dot:nth-child(3) {
+			    animation-delay: 500ms;
+			}
+			.justify-text{
+				text-align: justify;
+			}
+		</style>
+	</head>
+	<body>
+		<main>
+			<div>
+				<h1>Веб-сервис временно недоступен<span class="dot">.</span><span class="dot">.</span><span class="dot">.</span></h1>
+				<p class="justify-text">
+				    К сожалению, наш сервис столкнулся с техническими неполадками. Мы уже работаем над их устранением и стараемся как можно скорее вернуть его в рабочее состояние.
+				</p>
+				<p class="justify-text">
+				    Приносим извинения за доставленные неудобства.
+				</p>
+				<p class="justify-text">
+				    Служба ИУС.
+				</p>
+			</div>
+		</main>
+	</body>
+</html>

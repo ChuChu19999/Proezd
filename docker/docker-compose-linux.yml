@@ -1,0 +1,46 @@
+version: '3.8'
+
+networks:
+  proezd_network:
+
+volumes:
+  proezd_static:
+  proezd_media:
+
+services:
+  backend:
+    container_name: proezd_django
+    image: harbor.gd-urengoy.gazprom.ru/proezd/proezd_django:latest
+    command: gunicorn config.wsgi:application --bind 0.0.0.0:5000
+    restart: always
+    networks:
+      - proezd_network
+    volumes:
+      - proezd_static:/home/app/web/backend_static
+      - proezd_media:/home/app/web/media
+
+  gateway:
+    container_name: proezd_nginx
+    image: harbor.gd-urengoy.gazprom.ru/proezd/proezd_nginx:latest
+    restart: always
+    depends_on:
+      - backend
+    links:
+      - backend
+    networks:
+      - proezd_network
+    ports:
+      - '8017:80'
+    volumes:
+      - proezd_static:/backend_static
+      - proezd_media:/media
+
+  redis:
+    restart: unless-stopped
+    image: harbor.gd-urengoy.gazprom.ru/docker_hub/redis:7.2.1-alpine
+    container_name: proezd_redis
+    expose:
+      - '6379'
+    networks:
+      - proezd_network
+    command: /bin/sh -c "rm -rf /etc/localtime && ln -s /usr/share/zoneinfo/Asia/Yekaterinburg /etc/localtime && echo 'Asia/Yekaterinburg' > /etc/timezone" && exec redis-server"

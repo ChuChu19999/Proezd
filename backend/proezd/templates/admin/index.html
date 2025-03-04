@@ -1,0 +1,19 @@
+{% extends "admin/index.html" %}
+{% load i18n static %}
+
+{% block content %}
+    {% if upload_button %}
+    <div class="module">
+        <h2>Загрузка данных</h2>
+        <div style="margin: 10px 0;">
+            {{ upload_button|safe }}
+        </div>
+    </div>
+    {% endif %}
+
+    {% if analyze_button %}
+    {{ analyze_button|safe }}
+    {% endif %}
+
+    {{ block.super }}
+{% endblock %} 

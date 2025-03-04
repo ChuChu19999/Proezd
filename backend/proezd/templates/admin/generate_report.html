@@ -1,0 +1,105 @@
+{% extends "admin/base_site.html" %}
+{% load i18n static %}
+
+{% block content %}
+<div class="module">
+    <h2>Формирование отчета</h2>
+    <form method="post">
+        {% csrf_token %}
+        <div style="margin: 20px 0;">
+            <label for="report_date">Выберите месяц и год:</label>
+            <input type="month" id="report_date" name="report_date" required style="margin-left: 10px;" 
+                value="{{ default_date }}">
+        </div>
+        
+        <div style="margin: 20px 0;">
+            <h3>Тарифы по категориям:</h3>
+            <div style="margin: 10px 0;">
+                <label for="tariff_1">1 категория (до 3,5 т):</label>
+                <input type="text" id="tariff_1" name="tariff_1" required pattern="[0-9,]+" 
+                    style="margin-left: 10px;" value="{{ default_tariffs.tariff_1 }}">
+                <span style="margin-left: 5px;">₽</span>
+            </div>
+            <div style="margin: 10px 0;">
+                <label for="tariff_2">2 категория (от 3,5 до 10 т):</label>
+                <input type="text" id="tariff_2" name="tariff_2" required pattern="[0-9,]+" 
+                    style="margin-left: 10px;" value="{{ default_tariffs.tariff_2 }}">
+                <span style="margin-left: 5px;">₽</span>
+            </div>
+            <div style="margin: 10px 0;">
+                <label for="tariff_3">3 категория (от 10 до 25 т):</label>
+                <input type="text" id="tariff_3" name="tariff_3" required pattern="[0-9,]+" 
+                    style="margin-left: 10px;" value="{{ default_tariffs.tariff_3 }}">
+                <span style="margin-left: 5px;">₽</span>
+            </div>
+            <div style="margin: 10px 0;">
+                <label for="tariff_4">4 категория (свыше 25 т):</label>
+                <input type="text" id="tariff_4" name="tariff_4" required pattern="[0-9,]+" 
+                    style="margin-left: 10px;" value="{{ default_tariffs.tariff_4 }}">
+                <span style="margin-left: 5px;">₽</span>
+            </div>
+        </div>
+
+        <div class="submit-row" style="margin-top: 20px;">
+            <input type="submit" value="Сформировать" class="default" name="_save">
+        </div>
+    </form>
+</div>
+
+<script>
+document.addEventListener('DOMContentLoaded', function() {
+    // Функция для обработки ввода
+    function handleInput(e) {
+        // Заменяем точку на запятую
+        if (e.target.value.includes('.')) {
+            e.target.value = e.target.value.replace('.', ',');
+        }
+        
+        // Проверяем, что введены только цифры и одна запятая
+        let value = e.target.value;
+        let commaCount = (value.match(/,/g) || []).length;
+        
+        // Если запятых больше одной, оставляем только первую
+        if (commaCount > 1) {
+            let parts = value.split(',');
+            e.target.value = parts[0] + ',' + parts.slice(1).join('');
+        }
+        
+        // Удаляем все символы кроме цифр и запятой
+        e.target.value = e.target.value.replace(/[^\d,]/g, '');
+    }
+
+    // Добавляем обработчики для всех полей тарифов
+    ['tariff_1', 'tariff_2', 'tariff_3', 'tariff_4'].forEach(id => {
+        const input = document.getElementById(id);
+        input.addEventListener('input', handleInput);
+        
+        // Сохраняем оригинальное значение при загрузке
+        input.dataset.originalValue = input.value;
+        
+        // Преобразуем значение перед отправкой формы
+        input.form.addEventListener('submit', function() {
+            // Создаем скрытое поле для отправки значения с точкой
+            const hiddenInput = document.createElement('input');
+            hiddenInput.type = 'hidden';
+            hiddenInput.name = input.name;
+            hiddenInput.value = input.value.replace(',', '.');
+            input.form.appendChild(hiddenInput);
+            
+            // Возвращаем оригинальное значение с запятой
+            input.value = input.dataset.originalValue;
+            
+            // Отключаем оригинальное поле
+            input.disabled = true;
+        });
+        
+        // Восстанавливаем поле после отправки
+        input.form.addEventListener('submit', function() {
+            setTimeout(() => {
+                input.disabled = false;
+            }, 100);
+        });
+    });
+});
+</script>
+{% endblock %} 
