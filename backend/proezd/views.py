@@ -1120,23 +1120,23 @@ def generate_report(request):
             # Получаем дату и тарифы из формы
             report_date = datetime.strptime(request.POST.get("report_date"), "%Y-%m")
             month_name = report_date.strftime("%B_%Y")
-            
+
             # Словарь для перевода названий месяцев
             month_translations = {
-                'January': 'Январь',
-                'February': 'Февраль',
-                'March': 'Март',
-                'April': 'Апрель',
-                'May': 'Май',
-                'June': 'Июнь',
-                'July': 'Июль',
-                'August': 'Август',
-                'September': 'Сентябрь',
-                'October': 'Октябрь',
-                'November': 'Ноябрь',
-                'December': 'Декабрь'
+                "January": "Январь",
+                "February": "Февраль",
+                "March": "Март",
+                "April": "Апрель",
+                "May": "Май",
+                "June": "Июнь",
+                "July": "Июль",
+                "August": "Август",
+                "September": "Сентябрь",
+                "October": "Октябрь",
+                "November": "Ноябрь",
+                "December": "Декабрь",
             }
-            
+
             # Переводим название месяца на русский
             month_eng = report_date.strftime("%B")
             month_rus = month_translations[month_eng]
@@ -1161,7 +1161,9 @@ def generate_report(request):
 
             # Создаем стили
             header_font = Font(bold=True)
-            center_alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
+            center_alignment = Alignment(
+                horizontal="center", vertical="center", wrap_text=True
+            )
             red_fill = PatternFill(
                 start_color="FFFF0000", end_color="FFFF0000", fill_type="solid"
             )
@@ -1332,20 +1334,33 @@ def generate_report(request):
                                 )
 
                             # Добавляем запись в упрощенный отчет (только максимальная фиксация)
-                            ws_simple.cell(row=current_row_simple, column=1).value = current_number
-                            ws_simple.cell(row=current_row_simple, column=2).value = fixation_count
-                            
+                            ws_simple.cell(row=current_row_simple, column=1).value = (
+                                current_number
+                            )
+                            ws_simple.cell(row=current_row_simple, column=2).value = (
+                                fixation_count
+                            )
+
                             # Копируем значения из полного отчета
                             for src_col, dst_col in [(5, 3), (6, 4), (9, 5)]:
-                                cell_value = ws.cell(row=merge_start_row, column=src_col).value
-                                ws_simple.cell(row=current_row_simple, column=dst_col).value = cell_value
+                                cell_value = ws.cell(
+                                    row=merge_start_row, column=src_col
+                                ).value
+                                ws_simple.cell(
+                                    row=current_row_simple, column=dst_col
+                                ).value = cell_value
 
                             # Форматируем ячейки в упрощенном отчете
                             for col in range(1, 6):
-                                cell = ws_simple.cell(row=current_row_simple, column=col)
+                                cell = ws_simple.cell(
+                                    row=current_row_simple, column=col
+                                )
                                 cell.alignment = center_alignment
                                 cell.border = thin_border
-                                if col == 1 and current_number.upper() not in valid_numbers:
+                                if (
+                                    col == 1
+                                    and current_number.upper() not in valid_numbers
+                                ):
                                     cell.fill = red_fill
 
                             current_row_simple += 1
@@ -1526,11 +1541,13 @@ def generate_report(request):
                 # Добавляем последнюю запись в упрощенный отчет
                 ws_simple.cell(row=current_row_simple, column=1).value = current_number
                 ws_simple.cell(row=current_row_simple, column=2).value = fixation_count
-                
+
                 # Копируем значения из полного отчета
                 for src_col, dst_col in [(5, 3), (6, 4), (9, 5)]:
                     cell_value = ws.cell(row=merge_start_row, column=src_col).value
-                    ws_simple.cell(row=current_row_simple, column=dst_col).value = cell_value
+                    ws_simple.cell(row=current_row_simple, column=dst_col).value = (
+                        cell_value
+                    )
 
                 # Форматируем ячейки в упрощенном отчете
                 for col in range(1, 6):
@@ -1542,11 +1559,13 @@ def generate_report(request):
 
             # Сохраняем файлы
             filename = f'Анализ_потока_{report_date.strftime("%m_%Y")}.xlsx'
-            filename_simple = f'Анализ_потока_краткий_{report_date.strftime("%m_%Y")}.xlsx'
-            
+            filename_simple = (
+                f'Анализ_потока_краткий_{report_date.strftime("%m_%Y")}.xlsx'
+            )
+
             filepath = os.path.join("media", filename)
             filepath_simple = os.path.join("media", filename_simple)
-            
+
             os.makedirs("media", exist_ok=True)
             wb.save(filepath)
             wb_simple.save(filepath_simple)
@@ -1555,31 +1574,32 @@ def generate_report(request):
                 # Создаем ZIP-архив с обоими файлами
                 zip_filename = f'Анализ_потока_{report_date.strftime("%m_%Y")}.zip'
                 zip_filepath = os.path.join("media", zip_filename)
-                
+
                 import zipfile
-                with zipfile.ZipFile(zip_filepath, 'w') as zipf:
+
+                with zipfile.ZipFile(zip_filepath, "w") as zipf:
                     zipf.write(filepath, os.path.basename(filepath))
                     zipf.write(filepath_simple, os.path.basename(filepath_simple))
 
                 # Отправляем ZIP-архив пользователю
                 response = FileResponse(
-                    open(zip_filepath, 'rb'),
-                    content_type='application/zip',
+                    open(zip_filepath, "rb"),
+                    content_type="application/zip",
                     as_attachment=True,
-                    filename=zip_filename
+                    filename=zip_filename,
                 )
-                
+
                 # Добавляем callback для удаления файлов после отправки
                 def cleanup():
                     for f in [filepath, filepath_simple, zip_filepath]:
                         if os.path.exists(f):
                             os.remove(f)
                             logger.info(f"Временный файл {f} удален")
-                
+
                 response._resource_closers.append(cleanup)
-                
+
                 return response
-                
+
             except Exception as e:
                 # В случае ошибки удаляем все созданные файлы
                 for f in [filepath, filepath_simple, zip_filepath]:
@@ -1591,7 +1611,11 @@ def generate_report(request):
 
         except Exception as e:
             # В случае ошибки также проверяем и удаляем файлы
-            for f in [filepath, filepath_simple, zip_filepath] if 'filepath' in locals() else []:
+            for f in (
+                [filepath, filepath_simple, zip_filepath]
+                if "filepath" in locals()
+                else []
+            ):
                 if os.path.exists(f):
                     os.remove(f)
                     logger.info(f"Временный файл {f} удален после ошибки")
@@ -1601,12 +1625,12 @@ def generate_report(request):
     else:
         # Добавляем значения по умолчанию в контекст
         context = {
-            'default_date': datetime.now().strftime('%Y-%m'),
-            'default_tariffs': {
-                'tariff_1': '1410,28',
-                'tariff_2': '2820,57',
-                'tariff_3': '5641,13',
-                'tariff_4': '9025,81',
-            }
+            "default_date": datetime.now().strftime("%Y-%m"),
+            "default_tariffs": {
+                "tariff_1": "1410,28",
+                "tariff_2": "2820,57",
+                "tariff_3": "5641,13",
+                "tariff_4": "9025,81",
+            },
         }
         return render(request, "admin/generate_report.html", context)
