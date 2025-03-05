@@ -44,3 +44,31 @@ services:
     networks:
       - proezd_network
     command: /bin/sh -c "rm -rf /etc/localtime && ln -s /usr/share/zoneinfo/Asia/Yekaterinburg /etc/localtime && echo 'Asia/Yekaterinburg' > /etc/timezone" && exec redis-server"
+
+  celery_worker:
+    container_name: proezd_celery_worker
+    image: harbor.gd-urengoy.gazprom.ru/proezd/proezd_django:latest
+    command: celery -A proezd worker -P eventlet -l info
+    restart: always
+    networks:
+      - proezd_network
+    volumes:
+      - proezd_static:/home/app/web/backend_static
+      - proezd_media:/home/app/web/media
+    depends_on:
+      - redis
+      - backend
+
+  celery_beat:
+    container_name: proezd_celery_beat
+    image: harbor.gd-urengoy.gazprom.ru/proezd/proezd_django:latest
+    command: celery -A proezd beat -l info
+    restart: always
+    networks:
+      - proezd_network
+    volumes:
+      - proezd_static:/home/app/web/backend_static
+      - proezd_media:/home/app/web/media
+    depends_on:
+      - redis
+      - backend
