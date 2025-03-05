@@ -30,20 +30,17 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 
-# Функции для обработки номеров
 @lru_cache(maxsize=1000)
 def similar(a, b):
     """Вычисляет схожесть двух строк с учетом форматов российских номеров"""
     logger.info(f"Сравниваем номера {a} и {b}")
 
-    # Заменяем ? на . для регулярных выражений
     a_pattern = a.replace("?", ".")
     b_pattern = b.replace("?", ".")
 
     # Если в номере есть ?, считаем его частично распознанным
     if "?" in a or "?" in b:
         logger.info(f"Один из номеров содержит ?, проверяем совпадение по шаблону")
-        # Проверяем совпадение по шаблону
         if re.match(f"^{a_pattern}$", b) or re.match(f"^{b_pattern}$", a):
             logger.info(f"Номера совпадают по шаблону, возвращаем 0.9")
             return 0.9
@@ -102,11 +99,9 @@ def similar(a, b):
         "special": 0.92,
     }
 
-    # Находим базовую схожесть через SequenceMatcher
     base_similarity = SequenceMatcher(None, a, b).ratio()
     logger.info(f"Базовая схожесть: {base_similarity:.2%}")
 
-    # Если типы номеров совпадают, увеличиваем базовую схожесть
     if type_a == type_b:
         base_similarity = base_similarity * 1.1
         logger.info(f"Типы совпадают, увеличенная схожесть: {base_similarity:.2%}")
@@ -327,9 +322,7 @@ def analyze_numbers(request):
             logger.info("Возвращаем страницу анализа номеров")
             return render(request, "admin/analyze_numbers.html")
 
-        # Проверяем, есть ли запрос на сортировку
         if request.GET.get("sort") == "true":
-            # Получаем сохраненные результаты из сессии
             results = request.session.get("analysis_results", [])
             if not results:
                 logger.warning("Нет сохраненных результатов анализа")
@@ -356,7 +349,6 @@ def analyze_numbers(request):
 
         with connection.cursor() as cursor:
             try:
-                # Получаем эталонные номера
                 logger.info("Получаем список эталонных номеров из базы...")
                 cursor.execute(
                     f"""
@@ -439,7 +431,6 @@ def analyze_numbers(request):
                 # Сохраняем результаты в сессии для последующей сортировки
                 request.session["analysis_results"] = results
 
-                # По умолчанию сортируем по убыванию
                 results.sort(
                     key=lambda x: float(x["similarity"].rstrip("%")), reverse=True
                 )
@@ -556,14 +547,12 @@ def upload_potok(request):
             try:
                 df = pd.read_excel(request.FILES["file"])
 
-                # Проверяем количество листов
                 if len(pd.ExcelFile(request.FILES["file"]).sheet_names) > 1:
                     messages.error(
                         request, "Excel файл должен содержать только один лист"
                     )
                     return redirect("admin:index")
 
-                # Проверяем заголовки
                 required_headers = {
                     "A": "Дата фиксации",
                     "B": "Гос. номер",
@@ -1121,7 +1110,6 @@ def generate_report(request):
             report_date = datetime.strptime(request.POST.get("report_date"), "%Y-%m")
             month_name = report_date.strftime("%B_%Y")
 
-            # Словарь для перевода названий месяцев
             month_translations = {
                 "January": "Январь",
                 "February": "Февраль",
@@ -1240,9 +1228,7 @@ def generate_report(request):
             for col, width in column_widths_simple.items():
                 ws_simple.column_dimensions[get_column_letter(col)].width = width
 
-            # Получаем данные из базы
             with connection.cursor() as cursor:
-                # Получаем список эталонных номеров
                 cursor.execute(
                     f"""
                     SELECT DISTINCT gn 

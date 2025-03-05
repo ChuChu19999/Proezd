@@ -12,14 +12,9 @@ import re
 POTOK_TABLE = os.getenv("POSTGRES_TABLE_POTOK")
 PROPUSK_TABLE = os.getenv("POSTGRES_TABLE_PROPUSK")
 
-# Настраиваем логирование
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
-
-# Создаем форматтер для логов
 formatter = logging.Formatter("%(asctime)s - %(levelname)s - %(message)s")
-
-# Добавляем обработчик для вывода в консоль
 console_handler = logging.StreamHandler()
 console_handler.setFormatter(formatter)
 logger.addHandler(console_handler)
@@ -30,14 +25,12 @@ def similar(a, b):
     """Вычисляет схожесть двух строк с учетом форматов российских номеров"""
     logger.info(f"Сравниваем номера {a} и {b}")
 
-    # Заменяем ? на . для регулярных выражений
     a_pattern = a.replace("?", ".")
     b_pattern = b.replace("?", ".")
 
     # Если в номере есть ?, считаем его частично распознанным
     if "?" in a or "?" in b:
         logger.info(f"Один из номеров содержит ?, проверяем совпадение по шаблону")
-        # Проверяем совпадение по шаблону
         if re.match(f"^{a_pattern}$", b) or re.match(f"^{b_pattern}$", a):
             logger.info(f"Номера совпадают по шаблону, возвращаем 0.9")
             return 0.9
@@ -96,11 +89,9 @@ def similar(a, b):
         "special": 0.92,
     }
 
-    # Находим базовую схожесть через SequenceMatcher
     base_similarity = SequenceMatcher(None, a, b).ratio()
     logger.info(f"Базовая схожесть: {base_similarity:.2%}")
 
-    # Если типы номеров совпадают, увеличиваем базовую схожесть
     if type_a == type_b:
         base_similarity = base_similarity * 1.1
         logger.info(f"Типы совпадают, увеличенная схожесть: {base_similarity:.2%}")
@@ -330,7 +321,6 @@ def analyze_numbers_task():
 
         with connection.cursor() as cursor:
             try:
-                # Получаем эталонные номера
                 logger.info("Получаем список эталонных номеров из базы...")
                 cursor.execute(
                     f"""
@@ -353,7 +343,6 @@ def analyze_numbers_task():
                     f"Подготовлены индексы для поиска. Длины номеров: {len(ref_data[0])}, Префиксы: {len(ref_data[1])}"
                 )
 
-                # Получаем номера для анализа
                 logger.info("Получаем номера для анализа из потока...")
                 try:
                     cursor.execute(
@@ -384,11 +373,9 @@ def analyze_numbers_task():
                     logger.warning("Не найдено номеров для анализа")
                     return
 
-                # Обрабатываем номера
                 results = process_numbers(potok_numbers, ref_data, 0.6)
                 logger.info(f"Обработка завершена. Получено {len(results)} результатов")
 
-                # Сортируем результаты по дате
                 results.sort(key=lambda x: x["dt"])
                 logger.info("Результаты отсортированы по дате")
 
@@ -432,7 +419,6 @@ def analyze_numbers_task():
                     connection.commit()
                     logger.info(f"Автоматически заменено {replaced_count} номеров")
 
-                # Логируем общую статистику
                 logger.info(
                     f"Анализ завершен. Всего обработано {len(results)} номеров, "
                     f"из них автоматически заменено {len(high_similarity_results)}"
