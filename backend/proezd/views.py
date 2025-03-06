@@ -17,6 +17,7 @@ import multiprocessing as mp
 from openpyxl import Workbook
 from openpyxl.styles import PatternFill, Font, Alignment, Border, Side
 from openpyxl.utils import get_column_letter
+from psycopg2.extras import execute_values
 
 POTOK_TABLE = os.getenv("POSTGRES_TABLE_POTOK")
 PROPUSK_TABLE = os.getenv("POSTGRES_TABLE_PROPUSK")
@@ -33,85 +34,31 @@ logger = logging.getLogger(__name__)
 @lru_cache(maxsize=1000)
 def similar(a, b):
     """Вычисляет схожесть двух строк с учетом форматов российских номеров"""
-    logger.info(f"Сравниваем номера {a} и {b}")
 
-    a_pattern = a.replace("?", ".")
-    b_pattern = b.replace("?", ".")
+    def escape_pattern(s):
+        # Экранируем все специальные символы regex, кроме точки (для ?)
+        special_chars = "[](){}*+?^$|\\"
+        return "".join("\\" + c if c in special_chars else c for c in s)
+
+    # Заменяем ? на . и экранируем остальные спецсимволы
+    a_pattern = escape_pattern(a.replace("?", "."))
+    b_pattern = escape_pattern(b.replace("?", "."))
 
     # Если в номере есть ?, считаем его частично распознанным
     if "?" in a or "?" in b:
-        logger.info(f"Один из номеров содержит ?, проверяем совпадение по шаблону")
         if re.match(f"^{a_pattern}$", b) or re.match(f"^{b_pattern}$", a):
-            logger.info(f"Номера совпадают по шаблону, возвращаем 0.9")
             return 0.9
-        logger.info(f"Номера не совпадают по шаблону")
 
-    def get_plate_type(plate):
-        if len(plate) < 4:
-            return "unknown"
+    # Быстрая проверка на полное совпадение
+    if a == b:
+        return 1.0
 
-        # Паттерны для стандартных номеров с учетом возможного отсутствия региона
-        patterns = {
-            r"^[АВЕКМНОРСТУХ?][0-9?]{3}[АВЕКМНОРСТУХ?]{2}([0-9?]{2,3})?$": "standard",
-            r"^[0-9?]{4}[АВЕКМНОРСТУХ?]{2}([0-9?]{2,3})?$": "trailer",
-            r"^[АВЕКМНОРСТУХ?][0-9?]{3}[АВЕКМНОРСТУХ?]{2}$": "diplomatic",
-            r"^[АВЕКМНОРСТУХ?]{2}[0-9?]{5,7}$": "special",
-        }
+    # Быстрая проверка на длину
+    if abs(len(a) - len(b)) > 2:
+        return 0.0
 
-        # Если в номере есть ?, проверяем, что он соответствует хотя бы базовой структуре
-        if "?" in plate:
-            basic_structure = r"^[АВЕКМНОРСТУХ0-9?]+$"
-            if not re.match(basic_structure, plate):
-                return "unknown"
-
-            # Проверяем соответствие базовым шаблонам без учета длины
-            base_patterns = {
-                r"^[АВЕКМНОРСТУХ?][0-9?]+[АВЕКМНОРСТУХ?]{2}": "standard",
-                r"^[0-9?]+[АВЕКМНОРСТУХ?]{2}": "trailer",
-                r"^[АВЕКМНОРСТУХ?][0-9?]+[АВЕКМНОРСТУХ?]{2}$": "diplomatic",
-                r"^[АВЕКМНОРСТУХ?]{2}[0-9?]+$": "special",
-            }
-
-            for pattern, type_name in base_patterns.items():
-                if re.match(pattern, plate):
-                    return type_name
-
-        # Стандартная проверка для номеров без ?
-        for pattern, type_name in patterns.items():
-            if re.match(pattern, plate):
-                return type_name
-
-        return "unknown"
-
-    type_a = get_plate_type(a)
-    type_b = get_plate_type(b)
-    logger.info(f"Тип номера {a}: {type_a}")
-    logger.info(f"Тип номера {b}: {type_b}")
-
-    if type_a == "unknown" or type_b == "unknown":
-        logger.info(f"Один из номеров неизвестного типа, возвращаем 0.3")
-        return 0.3
-
-    type_weights = {
-        "standard": 0.95,
-        "trailer": 0.93,
-        "diplomatic": 0.94,
-        "special": 0.92,
-    }
-
-    base_similarity = SequenceMatcher(None, a, b).ratio()
-    logger.info(f"Базовая схожесть: {base_similarity:.2%}")
-
-    if type_a == type_b:
-        base_similarity = base_similarity * 1.1
-        logger.info(f"Типы совпадают, увеличенная схожесть: {base_similarity:.2%}")
-
-    similar_digits = {
-        "0": "О",
-        "8": "В",
-        "3": "З",
-    }
-
+    # Оптимизированная проверка на схожие символы
+    similar_digits = {"0": "О", "8": "В", "3": "З"}
     if len(a) == len(b):
         matches = sum(
             1
@@ -122,27 +69,10 @@ def similar(a, b):
             or (a[i] in similar_digits and b[i] == similar_digits[a[i]])
             or (b[i] in similar_digits and a[i] == similar_digits[b[i]])
         )
-        char_similarity = matches / len(a)
-        logger.info(
-            f"Посимвольная схожесть: {char_similarity:.2%} ({matches}/{len(a)} символов)"
-        )
-        base_similarity = max(base_similarity, char_similarity)
-        logger.info(f"Итоговая базовая схожесть: {base_similarity:.2%}")
+        return matches / len(a)
 
-    if a.startswith(b) or b.startswith(a):
-        min_len = min(len(a), len(b))
-        max_len = max(len(a), len(b))
-        weight = type_weights[type_a if len(a) < len(b) else type_b]
-        final_similarity = max(
-            base_similarity, min_len / max_len * weight + (1 - weight)
-        )
-        logger.info(
-            f"Один номер начинается с другого, финальная схожесть: {final_similarity:.2%}"
-        )
-        return final_similarity
-
-    logger.info(f"Возвращаем финальную схожесть: {min(base_similarity, 1.0):.2%}")
-    return min(base_similarity, 1.0)
+    # Для разной длины используем базовое сравнение
+    return SequenceMatcher(None, a, b).ratio()
 
 
 def prepare_reference_numbers(numbers):
@@ -160,83 +90,51 @@ def prepare_reference_numbers(numbers):
 def get_most_similar_number(plate, ref_data, threshold=0.6):
     by_length, by_prefix = ref_data
     plate_len = len(plate)
-    possible_lengths = {
-        plate_len - 2,
-        plate_len - 1,
-        plate_len,
-        plate_len + 1,
-        plate_len + 2,
-    }
+
+    # Быстрая проверка на точное совпадение
+    if plate in by_length.get(plate_len, set()):
+        return (plate, 1.0)
+
+    # Проверяем только номера похожей длины
     candidates = set()
+    for length in range(max(4, plate_len - 1), min(10, plate_len + 2)):
+        candidates.update(by_length.get(length, set()))
 
-    logger.info(f"Ищем похожие номера для {plate} с порогом {threshold}")
-    logger.info(f"Длина номера: {plate_len}")
-    logger.info(f"Возможные длины: {possible_lengths}")
-
+    # Если есть префикс, фильтруем по нему
     if len(plate) >= 2:
         prefix = plate[:2]
-        candidates.update(by_prefix[prefix])
-        logger.info(f"Добавлены кандидаты по префиксу {prefix}: {by_prefix[prefix]}")
+        prefix_matches = by_prefix.get(prefix, set())
+        if prefix_matches:
+            candidates = candidates.intersection(prefix_matches)
+            if not candidates and "?" in prefix:
+                # Если префикс содержит ?, проверяем все номера подходящей длины
+                candidates = set().union(
+                    *(
+                        by_length.get(l, set())
+                        for l in range(max(4, plate_len - 1), min(10, plate_len + 2))
+                    )
+                )
 
-    for length in possible_lengths:
-        candidates.update(by_length[length])
-        logger.info(f"Добавлены кандидаты длины {length}: {by_length[length]}")
-
-    if len(candidates) > 100 and len(plate) >= 2:
-        prefix = plate[:2]
-        candidates = by_prefix[prefix]
-        logger.info(
-            f"Слишком много кандидатов, оставляем только по префиксу {prefix}: {candidates}"
-        )
-
-    best_matches = []
+    best_match = None
     best_similarity = threshold
 
-    logger.info(f"Всего кандидатов для проверки: {len(candidates)}")
     for ref in candidates:
-        if abs(len(ref) - plate_len) > 3:
-            logger.info(
-                f"Пропускаем {ref} - слишком большая разница в длине ({len(ref)} vs {plate_len})"
-            )
-            continue
-
+        # Быстрая проверка на общие символы
         common_chars = sum(
             1 for a, b in zip(plate, ref) if a == b or a == "?" or b == "?"
         )
         if common_chars / max(len(plate), len(ref)) < threshold:
-            logger.info(
-                f"Пропускаем {ref} - мало общих символов ({common_chars}/{max(len(plate), len(ref))})"
-            )
             continue
 
         similarity = similar(plate, ref)
-        logger.info(f"Проверяем {ref} - схожесть {similarity:.2%}")
-
-        # Если нашли номер с такой же схожестью, добавляем его в список
-        if (
-            abs(similarity - best_similarity) < 0.0001
-        ):  # Используем небольшой допуск для сравнения float
-            best_matches.append((ref, similarity))
-            logger.info(f"Найден еще один номер с такой же схожестью: {ref}")
-        # Если нашли номер с большей схожестью, очищаем список и добавляем новый
-        elif similarity > best_similarity:
+        if similarity > best_similarity:
             best_similarity = similarity
-            best_matches = [(ref, similarity)]
+            best_match = (ref, similarity)
+            # Если нашли почти полное совпадение, прекращаем поиск
+            if similarity > 0.95:
+                break
 
-    # Если найдено больше одного номера с одинаковой схожестью, возвращаем None
-    if len(best_matches) > 1:
-        logger.info(
-            f"Найдено несколько номеров с одинаковой схожестью {best_similarity:.2%}: {[match[0] for match in best_matches]}"
-        )
-        return None
-    elif best_matches:
-        logger.info(
-            f"Итоговый результат: {best_matches[0][0]} с схожестью {best_matches[0][1]:.2%}"
-        )
-        return best_matches[0]
-    else:
-        logger.info("Похожих номеров не найдено")
-        return None
+    return best_match if best_match and best_match[1] >= 0.88 else None
 
 
 def process_chunk(chunk_data):
@@ -244,69 +142,48 @@ def process_chunk(chunk_data):
     chunk_plates, ref_data, threshold = chunk_data
     results = []
 
+    # Создаем множество эталонных номеров для быстрой проверки
+    all_ref_numbers = set()
+    for numbers in ref_data[0].values():
+        all_ref_numbers.update(numbers)
+
+    # Предварительная фильтрация номеров с оптимизацией
+    filtered_plates = []
+    ru_letters = set("АВЕКМНОРСТУХ")
     for plate, dt, potok_id in chunk_plates:
         if not plate:
             continue
 
-        # Преобразуем в строку и приводим к верхнему регистру
         plate = str(plate).upper()
-        logger.info(f"Обрабатываем номер: {plate}")
+        # Быстрая проверка на недопустимые буквы
+        if any(c.isalpha() and c not in ru_letters for c in plate):
+            continue
 
-        # Если в номере есть ?, используем более низкий порог и не проверяем точное совпадение
-        if "?" in plate:
-            logger.info(f"Номер {plate} содержит ?, ищем похожие с порогом 0.5")
-            match_result = get_most_similar_number(plate, ref_data, 0.5)
-            if match_result:
-                ref_num, similarity = match_result
-                logger.info(
-                    f"Для номера {plate} найден похожий {ref_num} с схожестью {similarity:.2%}"
-                )
-                # Добавляем только если схожесть >= 88%
-                if similarity >= 0.88:
-                    results.append(
-                        {
-                            "id": potok_id,
-                            "original": plate,
-                            "suggested": ref_num,
-                            "similarity": f"{similarity:.2%}",
-                            "dt": dt.strftime("%Y-%m-%d %H:%M:%S"),
-                        }
-                    )
-                else:
-                    logger.info(
-                        f"Номер {plate} пропущен, так как схожесть {similarity:.2%} меньше 88%"
-                    )
-            else:
-                logger.info(
-                    f"Для номера {plate} не найдено похожих номеров с порогом 0.5"
-                )
-        else:
-            # Проверяем есть ли точное совпадение в эталонных номерах
-            exact_match = False
-            for numbers in ref_data[0].values():
-                if plate in numbers:
-                    exact_match = True
-                    break
+        # Быстрая проверка на точное совпадение
+        if plate in all_ref_numbers:
+            continue
 
-            if not exact_match:
-                match_result = get_most_similar_number(plate, ref_data, threshold)
-                if match_result:
-                    ref_num, similarity = match_result
-                    # Добавляем только если схожесть >= 88%
-                    if similarity >= 0.88:
-                        results.append(
-                            {
-                                "id": potok_id,
-                                "original": plate,
-                                "suggested": ref_num,
-                                "similarity": f"{similarity:.2%}",
-                                "dt": dt.strftime("%Y-%m-%d %H:%M:%S"),
-                            }
-                        )
-                    else:
-                        logger.info(
-                            f"Номер {plate} пропущен, так как схожесть {similarity:.2%} меньше 88%"
-                        )
+        filtered_plates.append((plate, dt, potok_id))
+
+    # Оптимизированный поиск похожих номеров
+    for plate, dt, potok_id in filtered_plates:
+        # Поиск похожих номеров с оптимизированным порогом
+        match_result = get_most_similar_number(
+            plate, ref_data, 0.5 if "?" in plate else threshold
+        )
+
+        if match_result:
+            ref_num, similarity = match_result
+            if similarity >= 0.88:
+                results.append(
+                    {
+                        "id": potok_id,
+                        "original": plate,
+                        "suggested": ref_num,
+                        "similarity": f"{similarity:.2%}",
+                        "dt": dt.strftime("%Y-%m-%d %H:%M:%S"),
+                    }
+                )
 
     return results
 
@@ -333,8 +210,6 @@ def analyze_numbers(request):
             sort_ascending = (
                 request.GET.get("sort_ascending", "false").lower() == "true"
             )
-
-            # Сортируем только результаты, без повторного анализа
             results.sort(
                 key=lambda x: float(x["similarity"].rstrip("%")),
                 reverse=not sort_ascending,
@@ -346,6 +221,9 @@ def analyze_numbers(request):
             return JsonResponse({"results": results})
 
         logger.info("Начинаем анализ номеров...")
+
+        # Размер пакета для обработки
+        BATCH_SIZE = 1000
 
         with connection.cursor() as cursor:
             try:
@@ -360,7 +238,6 @@ def analyze_numbers(request):
                 )
                 reference_numbers = {row[0].upper() for row in cursor.fetchall()}
                 logger.info(f"Получено {len(reference_numbers)} эталонных номеров")
-                logger.info(f"Эталонные номера: {', '.join(sorted(reference_numbers))}")
 
                 if not reference_numbers:
                     logger.warning("Не найдено эталонных номеров в базе")
@@ -373,9 +250,25 @@ def analyze_numbers(request):
                     f"Подготовлены индексы для поиска. Длины номеров: {len(ref_data[0])}, Префиксы: {len(ref_data[1])}"
                 )
 
-                # Получаем все номера для анализа с дополнительной фильтрацией латинских букв
-                logger.info("Получаем номера для анализа из потока...")
-                try:
+                # Получаем общее количество записей
+                cursor.execute(
+                    f"""
+                    SELECT COUNT(*)
+                    FROM {POTOK_TABLE}
+                    WHERE gosnmr IS NOT NULL 
+                    AND del IS NULL
+                    AND gosnmr !~ '[A-Za-z]'
+                """
+                )
+                total_records = cursor.fetchone()[0]
+                logger.info(f"Всего записей для обработки: {total_records}")
+
+                # Инициализируем список для хранения результатов
+                all_results = []
+                processed_records = 0
+
+                # Обрабатываем данные пакетами
+                while processed_records < total_records:
                     cursor.execute(
                         f"""
                         SELECT gosnmr, dt, potok_id
@@ -384,59 +277,51 @@ def analyze_numbers(request):
                         AND del IS NULL
                         AND gosnmr !~ '[A-Za-z]'
                         ORDER BY dt
+                        LIMIT {BATCH_SIZE}
+                        OFFSET {processed_records}
                     """
                     )
-                except Exception as e:
-                    logger.error(
-                        f"Ошибка SQL при получении номеров из потока: {str(e)}",
-                        exc_info=True,
-                    )
-                    return JsonResponse(
-                        {"error": f"Ошибка при получении номеров из базы: {str(e)}"},
-                        status=500,
-                    )
 
-                potok_numbers = cursor.fetchall()
-                logger.info(f"Получено {len(potok_numbers)} номеров для анализа")
-                logger.info(
-                    f"Номера для анализа: {', '.join(str(num[0]) for num in potok_numbers[:10])}..."
-                )
+                    batch_data = cursor.fetchall()
+                    if not batch_data:
+                        break
 
-                if not potok_numbers:
-                    logger.warning("Не найдено номеров для анализа")
-                    return JsonResponse(
-                        {"error": "Не найдено номеров для анализа"}, status=400
+                    # Параллельная обработка пакета
+                    num_processes = min(
+                        mp.cpu_count(), 4
+                    )  # Ограничиваем количество процессов
+                    chunk_size = len(batch_data) // num_processes + 1
+                    chunks = [
+                        batch_data[i : i + chunk_size]
+                        for i in range(0, len(batch_data), chunk_size)
+                    ]
+                    chunk_data = [(chunk, ref_data, 0.6) for chunk in chunks]
+
+                    logger.info(
+                        f"Обработка пакета {processed_records + 1}-{processed_records + len(batch_data)} из {total_records} записей"
                     )
 
-                # Параллельная обработка
-                num_processes = mp.cpu_count()
-                chunk_size = len(potok_numbers) // num_processes + 1
-                chunks = [
-                    potok_numbers[i : i + chunk_size]
-                    for i in range(0, len(potok_numbers), chunk_size)
-                ]
+                    with mp.Pool(processes=num_processes) as pool:
+                        for chunk_results in pool.imap_unordered(
+                            process_chunk, chunk_data
+                        ):
+                            all_results.extend(chunk_results)
 
-                # Подготовка данных для параллельной обработки
-                chunk_data = [(chunk, ref_data, 0.6) for chunk in chunks]
+                    processed_records += len(batch_data)
+                    logger.info(
+                        f"Обработано {processed_records} записей из {total_records}"
+                    )
 
-                logger.info(
-                    f"Начинаем параллельную обработку используя {num_processes} процессов"
-                )
+                # Сохраняем результаты в сессии
+                request.session["analysis_results"] = all_results
 
-                with mp.Pool(processes=num_processes) as pool:
-                    results = []
-                    for chunk_results in pool.imap_unordered(process_chunk, chunk_data):
-                        results.extend(chunk_results)
-
-                # Сохраняем результаты в сессии для последующей сортировки
-                request.session["analysis_results"] = results
-
-                results.sort(
+                # Сортируем результаты
+                all_results.sort(
                     key=lambda x: float(x["similarity"].rstrip("%")), reverse=True
                 )
                 logger.info("Результаты отсортированы по убыванию процента схожести")
 
-                return JsonResponse({"results": results})
+                return JsonResponse({"results": all_results})
 
             except Exception as e:
                 logger.error(
@@ -545,7 +430,16 @@ def upload_potok(request):
         form = PotokUploadForm(request.POST, request.FILES)
         if form.is_valid():
             try:
-                df = pd.read_excel(request.FILES["file"])
+                # Читаем Excel файл с оптимизированными параметрами
+                df = pd.read_excel(
+                    request.FILES["file"],
+                    engine="openpyxl",
+                    dtype={
+                        "Гос. номер": str,
+                        "Камера": str,
+                        "Приближение/удаление": str,
+                    },
+                )
 
                 if len(pd.ExcelFile(request.FILES["file"]).sheet_names) > 1:
                     messages.error(
@@ -568,7 +462,10 @@ def upload_potok(request):
                         )
                         return redirect("admin:index")
 
-                df["Дата фиксации"] = pd.to_datetime(df["Дата фиксации"])
+                # Оптимизированная обработка дат
+                df["Дата фиксации"] = pd.to_datetime(
+                    df["Дата фиксации"], format="mixed"
+                )
 
                 # Получаем даты из формы и убираем информацию о часовом поясе
                 date_from = form.cleaned_data["date_from"]
@@ -581,97 +478,71 @@ def upload_potok(request):
                 date_to = date_to.replace(hour=23, minute=59, second=59)
 
                 # Проверяем диапазон дат
-                if not all(
-                    (date_from <= date <= date_to) for date in df["Дата фиксации"]
-                ):
+                dates_mask = (df["Дата фиксации"] >= date_from) & (
+                    df["Дата фиксации"] <= date_to
+                )
+                if not dates_mask.all():
                     messages.error(
                         request, "В файле есть записи вне выбранного диапазона дат"
                     )
                     return redirect("admin:index")
 
+                # Векторизованная обработка данных
                 df["Гос. номер"] = df["Гос. номер"].apply(process_plate)
                 df["Приближение/удаление"] = df["Приближение/удаление"].str.upper()
+                df["Приближение/удаление"] = (
+                    df["Приближение/удаление"]
+                    .replace({"": None, "NAN": None})
+                    .where(pd.notna(df["Приближение/удаление"]), None)
+                )
 
                 schema_name = get_schema_name()
 
-                # Получаем список индексов
-                with connection.cursor() as cursor:
-                    cursor.execute(
-                        f"""
-                        SELECT schemaname, tablename, indexname, indexdef 
-                        FROM pg_indexes 
-                        WHERE tablename = '{POTOK_TABLE}' 
-                        AND schemaname = %s
-                    """,
-                        [schema_name],
-                    )
-                    indexes = cursor.fetchall()
+                from psycopg2.extras import execute_values
 
-                # Удаляем индексы
                 with connection.cursor() as cursor:
-                    for schema, table, index_name, _ in indexes:
-                        cursor.execute(f"DROP INDEX IF EXISTS {schema}.{index_name}")
-
-                # Получаем максимальный potok_id
-                with connection.cursor() as cursor:
+                    # Получаем максимальный potok_id одним запросом
                     cursor.execute(
                         f"SELECT COALESCE(MAX(potok_id), 0) FROM {POTOK_TABLE}"
                     )
                     max_potok_id = cursor.fetchone()[0]
 
-                # Подготавливаем данные для вставки
-                records = []
-                for idx, row in df.iterrows():
-                    records.append(
-                        {
-                            "gosnmr": row["Гос. номер"],
-                            "camera": row["Камера"],
-                            "direction": row["Приближение/удаление"],
-                            "filename": request.FILES["file"].name,
-                            "date_load_bgn": date_from,
-                            "date_load_end": date_to,
-                            "dt": row["Дата фиксации"],
-                            "potok_id": max_potok_id + idx + 1,
-                        }
-                    )
-
-                with connection.cursor() as cursor:
+                    # Устанавливаем таймзону
                     cursor.execute("SET timezone TO 'Asia/Yekaterinburg'")
-                    for record in records:
-                        cursor.execute(
-                            f"""
-                            INSERT INTO {POTOK_TABLE} (
-                                potok_id, gosnmr, dt, camera, direction, filename,
-                                date_load_bgn, date_load_end
-                            ) VALUES (
-                                %(potok_id)s, 
-                                %(gosnmr)s,
-                                %(dt)s,
-                                %(camera)s,
-                                %(direction)s,
-                                %(filename)s,
-                                %(date_load_bgn)s,
-                                %(date_load_end)s
+
+                    # Подготавливаем данные для пакетной вставки
+                    values = []
+                    filename = request.FILES["file"].name
+
+                    for idx, row in df.iterrows():
+                        values.append(
+                            (
+                                max_potok_id + idx + 1,  # potok_id
+                                row["Гос. номер"],  # gosnmr
+                                row["Дата фиксации"],  # dt
+                                row["Камера"],  # camera
+                                row["Приближение/удаление"],  # direction
+                                filename,  # filename
+                                date_from,  # date_load_bgn
+                                date_to,  # date_load_end
                             )
-                        """,
-                            record,
                         )
 
-                # Восстанавливаем индексы
-                with connection.cursor() as cursor:
-                    for schema, table, index_name, index_def in indexes:
-                        # Проверяем существование индекса перед созданием
-                        cursor.execute(
-                            f"""
-                            SELECT 1 FROM pg_indexes 
-                            WHERE schemaname = %s 
-                            AND tablename = %s 
-                            AND indexname = %s
-                        """,
-                            [schema, table, index_name],
-                        )
-                        if not cursor.fetchone():
-                            cursor.execute(index_def)
+                    # Выполняем пакетную вставку
+                    insert_query = f"""
+                        INSERT INTO {POTOK_TABLE} (
+                            potok_id, gosnmr, dt, camera, direction, filename,
+                            date_load_bgn, date_load_end
+                        ) VALUES %s
+                    """
+
+                    # Используем размер пакета 5000 записей
+                    batch_size = 5000
+                    for i in range(0, len(values), batch_size):
+                        batch = values[i : i + batch_size]
+                        execute_values(cursor, insert_query, batch)
+
+                    connection.commit()
 
                 messages.success(request, "Файл успешно обработан")
                 return redirect("admin:index")
