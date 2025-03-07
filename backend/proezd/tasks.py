@@ -234,62 +234,47 @@ def process_numbers(numbers, ref_data, threshold=0.6):
     """Обработка номеров"""
     results = []
     total = len(numbers)
+    batch_size = 500  # Размер пакета для обработки
+    processed = 0
 
-    for idx, (potok_id, plate, dt) in enumerate(numbers, 1):
-        if not plate:
-            continue
+    while processed < total:
+        batch = numbers[processed : processed + batch_size]
+        batch_results = []
 
-        if idx % 10 == 0:
-            logger.info(f"Обработано {idx}/{total} номеров")
+        for idx, (potok_id, plate, dt) in enumerate(batch, 1):
+            try:
+                if not plate:
+                    continue
 
-        # Преобразуем в строку и приводим к верхнему регистру
-        plate = str(plate).upper()
-        logger.info(f"Обрабатываем номер: {plate}")
+                if idx % 10 == 0:
+                    logger.info(f"Обработано {processed + idx}/{total} номеров")
 
-        # Если в номере есть ?, используем более низкий порог и не проверяем точное совпадение
-        if "?" in plate:
-            logger.info(f"Номер {plate} содержит ?, ищем похожие с порогом 0.5")
-            match_result = get_most_similar_number(plate, ref_data, 0.5)
-            if match_result:
-                ref_num, similarity = match_result
-                logger.info(
-                    f"Для номера {plate} найден похожий {ref_num} с схожестью {similarity:.2%}"
-                )
-                # Добавляем только если схожесть >= 90%
-                if similarity >= 0.9:
-                    results.append(
-                        {
-                            "id": potok_id,
-                            "original": plate,
-                            "suggested": ref_num,
-                            "similarity": f"{similarity:.2%}",
-                            "dt": dt.strftime("%Y-%m-%d %H:%M:%S"),
-                            "skipped": False,
-                        }
-                    )
+                # Преобразуем в строку и приводим к верхнему регистру
+                plate = str(plate).upper()
+                logger.info(f"Обрабатываем номер: {plate}")
+
+                # Создаем множество эталонных номеров для быстрой проверки
+                all_ref_numbers = set()
+                for numbers in ref_data[0].values():
+                    all_ref_numbers.update(numbers)
+
+                # Быстрая проверка на точное совпадение
+                if plate in all_ref_numbers:
+                    logger.info(f"Найдено точное совпадение для {plate}")
+                    continue
+
+                # Если в номере есть ?, используем более низкий порог
+                if "?" in plate:
+                    logger.info(f"Номер {plate} содержит ?, ищем похожие с порогом 0.5")
+                    match_result = get_most_similar_number(plate, ref_data, 0.5)
                 else:
-                    logger.info(
-                        f"Номер {plate} пропущен, так как схожесть {similarity:.2%} меньше 90%"
-                    )
-            else:
-                logger.info(
-                    f"Для номера {plate} не найдено похожих номеров с порогом 0.5"
-                )
-        else:
-            # Проверяем есть ли точное совпадение в эталонных номерах
-            exact_match = False
-            for numbers in ref_data[0].values():
-                if plate in numbers:
-                    exact_match = True
-                    break
+                    match_result = get_most_similar_number(plate, ref_data, threshold)
 
-            if not exact_match:
-                match_result = get_most_similar_number(plate, ref_data, threshold)
                 if match_result:
                     ref_num, similarity = match_result
-                    # Добавляем только если схожесть >= 90%
-                    if similarity >= 0.9:
-                        results.append(
+                    # Добавляем только если схожесть >= 88%
+                    if similarity >= 0.88:
+                        batch_results.append(
                             {
                                 "id": potok_id,
                                 "original": plate,
@@ -299,10 +284,27 @@ def process_numbers(numbers, ref_data, threshold=0.6):
                                 "skipped": False,
                             }
                         )
+                        logger.info(
+                            f"Для номера {plate} найден похожий {ref_num} с схожестью {similarity:.2%}"
+                        )
                     else:
                         logger.info(
-                            f"Номер {plate} пропущен, так как схожесть {similarity:.2%} меньше 90%"
+                            f"Номер {plate} пропущен, так как схожесть {similarity:.2%} меньше 88%"
                         )
+                else:
+                    logger.info(f"Для номера {plate} не найдено похожих номеров")
+
+            except Exception as e:
+                logger.error(
+                    f"Ошибка при обработке номера {plate}: {str(e)}", exc_info=True
+                )
+                continue
+
+        results.extend(batch_results)
+        processed += len(batch)
+        logger.info(
+            f"Обработано {processed}/{total} записей ({(processed/total*100):.1f}%)"
+        )
 
     return results
 
@@ -332,7 +334,6 @@ def analyze_numbers_task():
                 )
                 reference_numbers = {row[0].upper() for row in cursor.fetchall()}
                 logger.info(f"Получено {len(reference_numbers)} эталонных номеров")
-                logger.info(f"Примеры эталонных номеров: {list(reference_numbers)[:5]}")
 
                 if not reference_numbers:
                     logger.warning("Не найдено эталонных номеров в базе")
@@ -343,52 +344,85 @@ def analyze_numbers_task():
                     f"Подготовлены индексы для поиска. Длины номеров: {len(ref_data[0])}, Префиксы: {len(ref_data[1])}"
                 )
 
-                logger.info("Получаем номера для анализа из потока...")
-                try:
-                    cursor.execute(
-                        f"""
-                        SELECT potok_id, gosnmr, dt
-                        FROM {POTOK_TABLE}
-                        WHERE gosnmr IS NOT NULL 
-                        AND del IS NULL
-                        AND gosnmr !~ '[A-Za-z]'
-                        ORDER BY dt
-                    """
-                    )
-                except Exception as e:
-                    logger.error(
-                        f"Ошибка SQL при получении номеров из потока: {str(e)}",
-                        exc_info=True,
-                    )
-                    return
+                # Получаем общее количество записей
+                cursor.execute(
+                    f"""
+                    SELECT COUNT(*)
+                    FROM {POTOK_TABLE}
+                    WHERE gosnmr IS NOT NULL 
+                    AND del IS NULL
+                    AND gosnmr !~ '[A-Za-z]'
+                """
+                )
+                total_records = cursor.fetchone()[0]
+                logger.info(f"Всего записей для обработки: {total_records}")
 
-                potok_numbers = cursor.fetchall()
-                logger.info(f"Получено {len(potok_numbers)} номеров для анализа")
-                if potok_numbers:
-                    logger.info(
-                        f"Примеры номеров для анализа: {[num[1] for num in potok_numbers[:5]]}"
-                    )
+                # Обрабатываем данные пакетами
+                BATCH_SIZE = 500
+                processed_records = 0
+                all_results = []
 
-                if not potok_numbers:
-                    logger.warning("Не найдено номеров для анализа")
-                    return
+                while processed_records < total_records:
+                    try:
+                        cursor.execute(
+                            f"""
+                            SELECT potok_id, gosnmr, dt
+                            FROM {POTOK_TABLE}
+                            WHERE gosnmr IS NOT NULL 
+                            AND del IS NULL
+                            AND gosnmr !~ '[A-Za-z]'
+                            ORDER BY dt
+                            LIMIT {BATCH_SIZE}
+                            OFFSET {processed_records}
+                        """
+                        )
 
-                results = process_numbers(potok_numbers, ref_data, 0.6)
-                logger.info(f"Обработка завершена. Получено {len(results)} результатов")
+                        batch_data = cursor.fetchall()
+                        if not batch_data:
+                            logger.info("Достигнут конец данных")
+                            break
 
-                results.sort(key=lambda x: x["dt"])
+                        logger.info(
+                            f"Начало обработки пакета {processed_records + 1}-{processed_records + len(batch_data)} из {total_records} записей"
+                        )
+
+                        # Обработка пакета
+                        batch_results = process_numbers(batch_data, ref_data, 0.6)
+                        all_results.extend(batch_results)
+                        logger.info(
+                            f"Пакет обработан, найдено {len(batch_results)} совпадений"
+                        )
+
+                        processed_records += len(batch_data)
+                        logger.info(
+                            f"Обработано {processed_records} записей из {total_records} ({(processed_records/total_records*100):.1f}%)"
+                        )
+
+                    except Exception as e:
+                        logger.error(
+                            f"Ошибка при обработке пакета: {str(e)}", exc_info=True
+                        )
+                        processed_records += BATCH_SIZE
+                        continue
+
+                logger.info(
+                    f"Обработка завершена. Всего найдено {len(all_results)} совпадений"
+                )
+
+                # Сортируем результаты по дате
+                all_results.sort(key=lambda x: x["dt"])
                 logger.info("Результаты отсортированы по дате")
 
                 # Автоматически заменяем номера с высокой схожестью
                 high_similarity_results = [
                     r
-                    for r in results
+                    for r in all_results
                     if not r.get("skipped", False)
-                    and float(r["similarity"].rstrip("%")) / 100 >= 0.9
+                    and float(r["similarity"].rstrip("%")) / 100 >= 0.88
                 ]
 
                 logger.info(
-                    f"Найдено {len(high_similarity_results)} номеров с высокой схожестью (>=90%)"
+                    f"Найдено {len(high_similarity_results)} номеров с высокой схожестью (>=88%)"
                 )
 
                 if high_similarity_results:
@@ -404,7 +438,7 @@ def analyze_numbers_task():
                                 (item["suggested"], item["id"]),
                             )
                             replaced_count += 1
-                            if replaced_count % 10 == 0:  # Логируем каждые 10 замен
+                            if replaced_count % 10 == 0:
                                 logger.info(
                                     f"Заменено {replaced_count}/{len(high_similarity_results)} номеров"
                                 )
@@ -420,7 +454,7 @@ def analyze_numbers_task():
                     logger.info(f"Автоматически заменено {replaced_count} номеров")
 
                 logger.info(
-                    f"Анализ завершен. Всего обработано {len(results)} номеров, "
+                    f"Анализ завершен. Всего обработано {len(all_results)} номеров, "
                     f"из них автоматически заменено {len(high_similarity_results)}"
                 )
 

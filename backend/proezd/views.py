@@ -18,6 +18,7 @@ from openpyxl import Workbook
 from openpyxl.styles import PatternFill, Font, Alignment, Border, Side
 from openpyxl.utils import get_column_letter
 from psycopg2.extras import execute_values
+import zipfile
 
 POTOK_TABLE = os.getenv("POSTGRES_TABLE_POTOK")
 PROPUSK_TABLE = os.getenv("POSTGRES_TABLE_PROPUSK")
@@ -139,53 +140,66 @@ def get_most_similar_number(plate, ref_data, threshold=0.6):
 
 def process_chunk(chunk_data):
     """Обработка части номеров в отдельном процессе"""
-    chunk_plates, ref_data, threshold = chunk_data
-    results = []
+    try:
+        chunk_plates, ref_data, threshold = chunk_data
+        results = []
 
-    # Создаем множество эталонных номеров для быстрой проверки
-    all_ref_numbers = set()
-    for numbers in ref_data[0].values():
-        all_ref_numbers.update(numbers)
+        # Создаем множество эталонных номеров для быстрой проверки
+        all_ref_numbers = set()
+        for numbers in ref_data[0].values():
+            all_ref_numbers.update(numbers)
 
-    # Предварительная фильтрация номеров с оптимизацией
-    filtered_plates = []
-    ru_letters = set("АВЕКМНОРСТУХ")
-    for plate, dt, potok_id in chunk_plates:
-        if not plate:
-            continue
+        # Предварительная фильтрация номеров с оптимизацией
+        filtered_plates = []
+        ru_letters = set("АВЕКМНОРСТУХ")
 
-        plate = str(plate).upper()
-        # Быстрая проверка на недопустимые буквы
-        if any(c.isalpha() and c not in ru_letters for c in plate):
-            continue
+        for plate, dt, potok_id in chunk_plates:
+            try:
+                if not plate:
+                    continue
 
-        # Быстрая проверка на точное совпадение
-        if plate in all_ref_numbers:
-            continue
+                plate = str(plate).upper()
+                # Быстрая проверка на недопустимые буквы
+                if any(c.isalpha() and c not in ru_letters for c in plate):
+                    continue
 
-        filtered_plates.append((plate, dt, potok_id))
+                # Быстрая проверка на точное совпадение
+                if plate in all_ref_numbers:
+                    continue
 
-    # Оптимизированный поиск похожих номеров
-    for plate, dt, potok_id in filtered_plates:
-        # Поиск похожих номеров с оптимизированным порогом
-        match_result = get_most_similar_number(
-            plate, ref_data, 0.5 if "?" in plate else threshold
-        )
+                filtered_plates.append((plate, dt, potok_id))
+            except Exception as e:
+                logger.error(f"Ошибка при обработке номера {plate}: {str(e)}")
+                continue
 
-        if match_result:
-            ref_num, similarity = match_result
-            if similarity >= 0.88:
-                results.append(
-                    {
-                        "id": potok_id,
-                        "original": plate,
-                        "suggested": ref_num,
-                        "similarity": f"{similarity:.2%}",
-                        "dt": dt.strftime("%Y-%m-%d %H:%M:%S"),
-                    }
+        # Оптимизированный поиск похожих номеров
+        for plate, dt, potok_id in filtered_plates:
+            try:
+                # Поиск похожих номеров с оптимизированным порогом
+                match_result = get_most_similar_number(
+                    plate, ref_data, 0.5 if "?" in plate else threshold
                 )
 
-    return results
+                if match_result:
+                    ref_num, similarity = match_result
+                    if similarity >= 0.88:
+                        results.append(
+                            {
+                                "id": potok_id,
+                                "original": plate,
+                                "suggested": ref_num,
+                                "similarity": f"{similarity:.2%}",
+                                "dt": dt.strftime("%Y-%m-%d %H:%M:%S"),
+                            }
+                        )
+            except Exception as e:
+                logger.error(f"Ошибка при поиске похожих номеров для {plate}: {str(e)}")
+                continue
+
+        return results
+    except Exception as e:
+        logger.error(f"Критическая ошибка в process_chunk: {str(e)}")
+        return []
 
 
 @staff_member_required
@@ -222,8 +236,8 @@ def analyze_numbers(request):
 
         logger.info("Начинаем анализ номеров...")
 
-        # Размер пакета для обработки
-        BATCH_SIZE = 1000
+        # Уменьшаем размер пакета для более стабильной работы
+        BATCH_SIZE = 500
 
         with connection.cursor() as cursor:
             try:
@@ -255,7 +269,7 @@ def analyze_numbers(request):
                     f"""
                     SELECT COUNT(*)
                     FROM {POTOK_TABLE}
-                    WHERE gosnmr IS NOT NULL 
+                    WHERE gosnmr IS NOT NULL
                     AND del IS NULL
                     AND gosnmr !~ '[A-Za-z]'
                 """
@@ -267,50 +281,77 @@ def analyze_numbers(request):
                 all_results = []
                 processed_records = 0
 
+                # Ограничиваем количество процессов и добавляем тайм-аут
+                num_processes = min(
+                    mp.cpu_count(), 2
+                )  # Уменьшаем максимальное количество процессов
+                logger.info(f"Используем {num_processes} процессов для обработки")
+
                 # Обрабатываем данные пакетами
                 while processed_records < total_records:
-                    cursor.execute(
-                        f"""
-                        SELECT gosnmr, dt, potok_id
-                        FROM {POTOK_TABLE}
-                        WHERE gosnmr IS NOT NULL 
-                        AND del IS NULL
-                        AND gosnmr !~ '[A-Za-z]'
-                        ORDER BY dt
-                        LIMIT {BATCH_SIZE}
-                        OFFSET {processed_records}
-                    """
-                    )
+                    try:
+                        cursor.execute(
+                            f"""
+                            SELECT gosnmr, dt, potok_id
+                            FROM {POTOK_TABLE}
+                            WHERE gosnmr IS NOT NULL
+                            AND del IS NULL
+                            AND gosnmr !~ '[A-Za-z]'
+                            ORDER BY dt
+                            LIMIT {BATCH_SIZE}
+                            OFFSET {processed_records}
+                        """
+                        )
 
-                    batch_data = cursor.fetchall()
-                    if not batch_data:
-                        break
+                        batch_data = cursor.fetchall()
+                        if not batch_data:
+                            logger.info("Достигнут конец данных")
+                            break
 
-                    # Параллельная обработка пакета
-                    num_processes = min(
-                        mp.cpu_count(), 4
-                    )  # Ограничиваем количество процессов
-                    chunk_size = len(batch_data) // num_processes + 1
-                    chunks = [
-                        batch_data[i : i + chunk_size]
-                        for i in range(0, len(batch_data), chunk_size)
-                    ]
-                    chunk_data = [(chunk, ref_data, 0.6) for chunk in chunks]
+                        # Параллельная обработка пакета
+                        chunk_size = len(batch_data) // num_processes + 1
+                        chunks = [
+                            batch_data[i : i + chunk_size]
+                            for i in range(0, len(batch_data), chunk_size)
+                        ]
+                        chunk_data = [(chunk, ref_data, 0.6) for chunk in chunks]
 
-                    logger.info(
-                        f"Обработка пакета {processed_records + 1}-{processed_records + len(batch_data)} из {total_records} записей"
-                    )
+                        logger.info(
+                            f"Начало обработки пакета {processed_records + 1}-{processed_records + len(batch_data)} из {total_records} записей"
+                        )
 
-                    with mp.Pool(processes=num_processes) as pool:
-                        for chunk_results in pool.imap_unordered(
-                            process_chunk, chunk_data
-                        ):
+                        # Создаем пул процессов с тайм-аутом
+                        with mp.Pool(processes=num_processes) as pool:
+                            chunk_results = []
+                            for result in pool.imap_unordered(
+                                process_chunk, chunk_data
+                            ):
+                                chunk_results.extend(result)
+                                logger.info(
+                                    f"Получены результаты для части пакета, найдено {len(result)} совпадений"
+                                )
+
                             all_results.extend(chunk_results)
+                            logger.info(
+                                f"Пакет обработан, всего найдено {len(chunk_results)} совпадений"
+                            )
 
-                    processed_records += len(batch_data)
-                    logger.info(
-                        f"Обработано {processed_records} записей из {total_records}"
-                    )
+                        processed_records += len(batch_data)
+                        logger.info(
+                            f"Обработано {processed_records} записей из {total_records} ({(processed_records/total_records*100):.1f}%)"
+                        )
+
+                    except Exception as e:
+                        logger.error(
+                            f"Ошибка при обработке пакета: {str(e)}", exc_info=True
+                        )
+                        # Пропускаем проблемный пакет и продолжаем с следующего
+                        processed_records += BATCH_SIZE
+                        continue
+
+                logger.info(
+                    f"Обработка завершена. Всего найдено {len(all_results)} совпадений"
+                )
 
                 # Сохраняем результаты в сессии
                 request.session["analysis_results"] = all_results
@@ -557,87 +598,43 @@ def upload_potok(request):
 
 
 def get_next_id(cursor, table, id_field):
-    cursor.execute(f"SELECT COALESCE(MAX({id_field}), 0) FROM {table}")
-    return cursor.fetchone()[0] + 1
+    """Получает следующий ID для указанной таблицы"""
+    cursor.execute(f"SELECT MAX({id_field}) FROM {table}")
+    max_id = cursor.fetchone()[0]
+    return (max_id or 0) + 1
 
 
-def get_next_companynr(cursor):
-    cursor.execute(f"SELECT COALESCE(MAX(companynr), 0) FROM {COMPANY_TABLE}")
-    return cursor.fetchone()[0] + 1
+def get_next_company_id(cursor):
+    """Получает следующий company_id более надежным способом"""
+    cursor.execute(
+        f"""
+        SELECT company_id 
+        FROM {COMPANY_TABLE} 
+        ORDER BY company_id DESC 
+        LIMIT 1
+    """
+    )
+    result = cursor.fetchone()
+    return (result[0] if result else 0) + 1
 
 
-def process_company(cursor, company_str):
-    # Пытаемся извлечь companynr из строки (число перед точкой)
-    match = re.match(r"^(\d+)\.(.+)$", company_str)
+def process_dates(date_value):
+    """Обрабатывает значения дат, возвращая None для некорректных значений"""
+    if pd.isna(date_value) or date_value is None or isinstance(date_value, str):
+        return None
+    return date_value.date() if isinstance(date_value, pd.Timestamp) else None
 
-    if match:
-        companynr = int(match.group(1))
-        company_name = match.group(2).strip()
 
-        # Проверяем существующую запись
-        cursor.execute(
-            """
-            SELECT company_id, company 
-            FROM {COMPANY_TABLE}
-            WHERE companynr = %s AND del = 0 
-            ORDER BY company_id DESC 
-            LIMIT 1
-        """,
-            [companynr],
-        )
-        existing = cursor.fetchone()
-
-        if existing:
-            company_id, existing_name = existing
-
-            if existing_name != company_name:
-                # Обновляем dateactual для старой записи
-                cursor.execute(
-                    """
-                    UPDATE {COMPANY_TABLE} 
-                    SET dateactual = CURRENT_DATE 
-                    WHERE company_id = %s
-                """,
-                    [company_id],
-                )
-
-                # Создаем новую запись
-                new_company_id = get_next_id(cursor, "company", "company_id")
-                cursor.execute(
-                    """
-                    INSERT INTO {COMPANY_TABLE} (company_id, company, del, pid, companynr)
-                    VALUES (%s, %s, 0, %s, %s)
-                """,
-                    [new_company_id, company_name, company_id, companynr],
-                )
-
-                return new_company_id
-            else:
-                return company_id
-        else:
-            # Если нет записи с таким companynr, берем следующий доступный
-            next_companynr = get_next_companynr(cursor)
-            new_company_id = get_next_id(cursor, "company", "company_id")
-            cursor.execute(
-                """
-                INSERT INTO {COMPANY_TABLE} (company_id, company, del, companynr)
-                VALUES (%s, %s, 0, %s)
-            """,
-                [new_company_id, company_name, next_companynr],
-            )
-            return new_company_id
-    else:
-        # Если нет номера, создаем запись с новым companynr
-        next_companynr = get_next_companynr(cursor)
-        new_company_id = get_next_id(cursor, "company", "company_id")
-        cursor.execute(
-            """
-            INSERT INTO {COMPANY_TABLE} (company_id, company, del, companynr)
-            VALUES (%s, %s, 0, %s)
-        """,
-            [new_company_id, company_str.strip(), next_companynr],
-        )
-        return new_company_id
+def process_mass(mass_str):
+    """Извлекает числовое значение массы из строки"""
+    if pd.isna(mass_str):
+        return None
+    # Если передано число, просто возвращаем его как int
+    if isinstance(mass_str, (int, float)):
+        return int(mass_str)
+    # Извлекаем только цифры из строки
+    mass_digits = re.findall(r"\d+", str(mass_str))
+    return int(mass_digits[0]) if mass_digits else None
 
 
 @staff_member_required
@@ -649,306 +646,553 @@ def upload_propusk(request):
                 df = pd.read_excel(request.FILES["file"])
                 propusk_type = form.cleaned_data["propusk_type"]
 
-                if propusk_type == "kronos":
-                    # Проверяем заголовки для базы Кронос
-                    required_headers = {
-                        "C": "№ ПРОПУСКА",
-                        "K": "автомобиль",
-                        "L": "Гос.номер",
-                        "N": "Разрешенная макс. масса (КГ)ТС",
-                        "P": "Срок действия (с..)",
-                        "Q": "Срок действия (по..)",
-                        "T": "Продлён до",
-                        "V": "Комментарий",
-                        "W": "Договорные отношения",
+                # Получаем схему базы данных
+                schema_name = get_schema_name()
+
+                with connection.cursor() as cursor:
+                    # Отключаем индексы перед массовой вставкой
+                    cursor.execute(
+                        f"""
+                        ALTER TABLE {PROPUSK_TABLE} SET UNLOGGED;
+                        DROP INDEX IF EXISTS idx_{PROPUSK_TABLE}_gn;
+                        DROP INDEX IF EXISTS idx_{PROPUSK_TABLE}_company_id;
+                        DROP INDEX IF EXISTS idx_{PROPUSK_TABLE}_dateactual;
+                    """
+                    )
+
+                    # Устанавливаем таймзону
+                    cursor.execute("SET timezone TO 'Asia/Yekaterinburg'")
+
+                    # Получаем следующий propusk_id одним запросом
+                    cursor.execute(
+                        f"SELECT COALESCE(MAX(propusk_id), 0) FROM {PROPUSK_TABLE}"
+                    )
+                    next_propusk_id = cursor.fetchone()[0] + 1
+
+                    # Получаем следующий company_id одним запросом
+                    next_company_id = get_next_company_id(cursor)
+
+                    # Получаем следующий companynr одним запросом
+                    cursor.execute(
+                        f"SELECT COALESCE(MAX(companynr), 0) FROM {COMPANY_TABLE}"
+                    )
+                    next_companynr = cursor.fetchone()[0] + 1
+
+                    # Кэшируем существующие компании
+                    cursor.execute(
+                        f"""
+                        SELECT c.companynr, c.company_id, c.company
+                        FROM {COMPANY_TABLE} c
+                        WHERE c.del = 0 AND c.dateactual IS NULL
+                    """
+                    )
+                    existing_companies = {
+                        str(row[0]): {"id": row[1], "name": row[2]}
+                        for row in cursor.fetchall()
                     }
 
-                    for col, header in required_headers.items():
-                        if df.columns[ord(col) - ord("A")] != header:
-                            messages.error(
-                                request,
-                                f"Неверный заголовок в столбце {col}. Ожидается: {header}",
-                            )
-                            return redirect("admin:index")
+                    # Подготавливаем данные для пакетной вставки
+                    propusk_values = []
+                    company_values = []
+                    company_updates = []
+                    BATCH_SIZE = (
+                        500  # Уменьшаем размер пакета для более стабильной работы
+                    )
 
-                    # Преобразуем даты
-                    date_columns = [
-                        "Срок действия (с..)",
-                        "Срок действия (по..)",
-                        "Продлён до",
-                    ]
-                    for col in date_columns:
-                        df[col] = pd.to_datetime(
-                            df[col], format="%d.%m.%Y", errors="coerce"
-                        )
+                    if propusk_type == "kronos":
+                        # Проверяем заголовки для базы Кронос
+                        required_headers = {
+                            "C": "№ ПРОПУСКА",
+                            "K": "автомобиль",
+                            "L": "Гос.номер",
+                            "N": "Разрешенная макс. масса (КГ)ТС",
+                            "P": "Срок действия (с..)",
+                            "Q": "Срок действия (по..)",
+                            "T": "Продлён до",
+                            "V": "Комментарий",
+                            "W": "Договорные отношения",
+                        }
 
-                    with connection.cursor() as cursor:
-                        # Получаем следующий propusk_id
-                        next_propusk_id = get_next_id(cursor, "propusk", "propusk_id")
-
-                        for idx, row in df.iterrows():
-                            # Обработка company_id
-                            company_id = process_company(
-                                cursor, str(row["От кого письмо"])
-                            )
-
-                            # Преобразуем NaT (Not a Time) в None для SQL
-                            dateb = (
-                                row["Срок действия (с..)"].date()
-                                if pd.notna(row["Срок действия (с..)"])
-                                else None
-                            )
-                            datee = (
-                                row["Срок действия (по..)"].date()
-                                if pd.notna(row["Срок действия (по..)"])
-                                else None
-                            )
-                            prodlen = (
-                                row["Продлён до"].date()
-                                if pd.notna(row["Продлён до"])
-                                else None
-                            )
-
-                            # Обработка комментария
-                            coment = (
-                                row["Комментарий"]
-                                if pd.notna(row["Комментарий"])
-                                else None
-                            )
-
-                            # Вставляем запись в propusk
-                            cursor.execute(
-                                f"""
-                                INSERT INTO {PROPUSK_TABLE} (
-                                    propusk_id, gn, company_id, dateb, datee, num,
-                                    contractrelationship, tct_id, mass, marka,
-                                    prodlen, coment
-                                ) VALUES (
-                                    %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s
+                        for col, header in required_headers.items():
+                            if df.columns[ord(col) - ord("A")] != header:
+                                messages.error(
+                                    request,
+                                    f"Неверный заголовок в столбце {col}. Ожидается: {header}",
                                 )
-                            """,
-                                [
+                                return redirect("admin:index")
+
+                        # Преобразуем даты
+                        date_columns = [
+                            "Срок действия (с..)",
+                            "Срок действия (по..)",
+                            "Продлён до",
+                        ]
+                        for col in date_columns:
+                            df[col] = pd.to_datetime(
+                                df[col], format="%d.%m.%Y", errors="coerce"
+                            )
+                            df[col] = df[col].where(pd.notna(df[col]), None)
+
+                        # Обрабатываем данные пакетами
+                        for idx, row in df.iterrows():
+                            company_str = str(row["От кого письмо"])
+
+                            # Получаем информацию о компании
+                            (
+                                action_type,
+                                existing_id,
+                                companynr,
+                                company_name,
+                                old_id,
+                            ) = get_company_info(cursor, company_str)
+
+                            if action_type == "use_existing":
+                                company_id = existing_id
+                            elif action_type == "reactivate":
+                                # Деактивируем активные записи
+                                cursor.execute(
+                                    f"""
+                                    UPDATE {COMPANY_TABLE}
+                                    SET dateactual = CURRENT_DATE
+                                    WHERE companynr = %s AND dateactual IS NULL AND del = 0
+                                    """,
+                                    [companynr],
+                                )
+
+                                # Получаем pid от последней записи
+                                cursor.execute(
+                                    f"""
+                                    SELECT company_id 
+                                    FROM {COMPANY_TABLE}
+                                    WHERE companynr = %s AND del = 0
+                                    ORDER BY company_id DESC
+                                    LIMIT 1
+                                    """,
+                                    [companynr],
+                                )
+                                last_record = cursor.fetchone()
+                                old_company_id = last_record[0] if last_record else None
+
+                                # Реактивируем запись с pid от последней записи
+                                cursor.execute(
+                                    f"""
+                                    UPDATE {COMPANY_TABLE}
+                                    SET dateactual = NULL, pid = %s
+                                    WHERE company_id = %s
+                                    """,
+                                    [old_company_id, existing_id],
+                                )
+                                company_id = existing_id
+                            else:  # create_new
+                                # Деактивируем активные записи
+                                cursor.execute(
+                                    f"""
+                                    UPDATE {COMPANY_TABLE}
+                                    SET dateactual = CURRENT_DATE
+                                    WHERE companynr = %s AND dateactual IS NULL AND del = 0
+                                    """,
+                                    [companynr],
+                                )
+
+                                # Получаем pid от последней записи
+                                cursor.execute(
+                                    f"""
+                                    SELECT company_id 
+                                    FROM {COMPANY_TABLE}
+                                    WHERE companynr = %s AND del = 0
+                                    ORDER BY company_id DESC
+                                    LIMIT 1
+                                    """,
+                                    [companynr],
+                                )
+                                last_record = cursor.fetchone()
+                                old_company_id = last_record[0] if last_record else None
+
+                                # Создаем новую запись с pid от последней записи
+                                cursor.execute(
+                                    f"""
+                                    INSERT INTO {COMPANY_TABLE} (company_id, company, del, pid, companynr)
+                                    VALUES (%s, %s, 0, %s, %s)
+                                    """,
+                                    [
+                                        next_company_id,
+                                        company_name,
+                                        old_company_id,
+                                        companynr,
+                                    ],
+                                )
+                                company_id = next_company_id
+                                next_company_id += 1
+
+                            # Добавляем запись пропуска
+                            propusk_values.append(
+                                (
                                     next_propusk_id + idx,
                                     process_plate(
                                         str(row["Гос.номер"]).replace(" ", "")
                                     ),
                                     company_id,
-                                    dateb,
-                                    datee,
+                                    process_dates(row["Срок действия (с..)"]),
+                                    process_dates(row["Срок действия (по..)"]),
                                     row["№ ПРОПУСКА"],
                                     row["Договорные отношения"],
-                                    2,  # tct_id всегда 2 для Кронос
-                                    row["Разрешенная макс. масса (КГ)ТС"],
+                                    2,  # tct_id для Кронос
+                                    process_mass(row["Разрешенная макс. масса (КГ)ТС"]),
                                     row["автомобиль"],
-                                    prodlen,
-                                    coment,
-                                ],
-                            )
-
-                elif propusk_type == "razoviy":
-                    # Проверяем заголовки для разовых пропусков
-                    required_headers = {
-                        "A": "Контрагент",
-                        "B": "Госномер",
-                        "C": "Дата начала проезда",
-                        "D": "Дата окончания проезда",
-                        "E": "Марка",
-                        "F": "Масса авто",
-                        "G": "Номер пропуска",
-                        "H": "Зона покрытия",
-                        "I": "Договорные отношения",
-                        "J": "Продлен до",
-                        "K": "Комментарий",
-                    }
-
-                    for col, header in required_headers.items():
-                        if df.columns[ord(col) - ord("A")] != header:
-                            messages.error(
-                                request,
-                                f"Неверный заголовок в столбце {col}. Ожидается: {header}",
-                            )
-                            return redirect("admin:index")
-
-                    # Пропускаем первые две строки
-                    df = df.iloc[1:]
-
-                    # Преобразуем даты
-                    date_columns = [
-                        "Дата начала проезда",
-                        "Дата окончания проезда",
-                        "Продлен до",
-                    ]
-                    for col in date_columns:
-                        df[col] = pd.to_datetime(
-                            df[col], format="%d.%m.%Y", errors="coerce"
-                        )
-
-                    with connection.cursor() as cursor:
-                        # Получаем следующий propusk_id
-                        next_propusk_id = get_next_id(cursor, "propusk", "propusk_id")
-
-                        # Обрабатываем каждую строку
-                        for idx, row in df.iterrows():
-                            # Обработка company_id
-                            company_id = process_company(cursor, str(row["Контрагент"]))
-
-                            # Преобразуем NaT (Not a Time) в None для SQL
-                            dateb = (
-                                row["Дата начала проезда"].date()
-                                if pd.notna(row["Дата начала проезда"])
-                                else None
-                            )
-                            datee = (
-                                row["Дата окончания проезда"].date()
-                                if pd.notna(row["Дата окончания проезда"])
-                                else None
-                            )
-                            prodlen = (
-                                row["Продлен до"].date()
-                                if pd.notna(row["Продлен до"])
-                                else None
-                            )
-
-                            # Обработка комментария
-                            coment = (
-                                row["Комментарий"]
-                                if pd.notna(row["Комментарий"])
-                                else None
-                            )
-
-                            # Обработка договорных отношений (удаление номера и точки в начале)
-                            contractrelationship = str(row["Договорные отношения"])
-                            if pd.notna(contractrelationship):
-                                # Удаляем число и точку в начале
-                                contractrelationship = re.sub(
-                                    r"^\d+\.", "", contractrelationship
-                                ).strip()
-                            else:
-                                contractrelationship = None
-
-                            # Обработка госномера
-                            gn = process_plate(str(row["Госномер"]).replace(" ", ""))
-
-                            # Вставляем запись в propusk
-                            cursor.execute(
-                                f"""
-                                INSERT INTO {PROPUSK_TABLE} (
-                                    propusk_id, gn, company_id, dateb, datee, num,
-                                    contractrelationship, tct_id, mass, marka,
-                                    prodlen, coment
-                                ) VALUES (
-                                    %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s
+                                    process_dates(row["Продлён до"]),
+                                    (
+                                        row["Комментарий"]
+                                        if pd.notna(row["Комментарий"])
+                                        else None
+                                    ),
                                 )
-                            """,
-                                [
-                                    next_propusk_id + idx,
-                                    gn,
-                                    company_id,
-                                    dateb,
-                                    datee,
-                                    row["Номер пропуска"],
-                                    contractrelationship,
-                                    3,  # tct_id = 3 для разовых пропусков
-                                    row["Масса авто"],
-                                    row["Марка"],
-                                    prodlen,
-                                    coment,
-                                ],
                             )
 
-                elif propusk_type == "gdya":
-                    # Проверяем заголовки для списка ГДЯ
-                    required_headers = {
-                        "A": "№ пропуска",
-                        "C": "Транспортное средство",
-                        "D": "Гос. номер",
-                        "E": "Получатель пропуска",
-                        "G": "Срок действия",
-                        "I": "Дата оформления",
-                    }
+                            # Выполняем пакетную вставку при достижении размера пакета
+                            if len(propusk_values) >= BATCH_SIZE:
+                                execute_batch_insert(
+                                    cursor,
+                                    company_updates,
+                                    company_values,
+                                    propusk_values,
+                                )
+                                company_updates = []
+                                company_values = []
+                                propusk_values = []
 
-                    for col, header in required_headers.items():
-                        if df.columns[ord(col) - ord("A")] != header:
-                            messages.error(
-                                request,
-                                f"Неверный заголовок в столбце {col}. Ожидается: {header}",
+                    elif propusk_type == "razoviy":
+                        # Проверяем заголовки для разовых пропусков
+                        required_headers = {
+                            "A": "Контрагент",
+                            "B": "Госномер",
+                            "C": "Дата начала проезда",
+                            "D": "Дата окончания проезда",
+                            "E": "Марка",
+                            "F": "Масса авто",
+                            "G": "Номер пропуска",
+                            "H": "Зона покрытия",
+                            "I": "Договорные отношения",
+                            "J": "Продлен до",
+                            "K": "Комментарий",
+                        }
+
+                        for col, header in required_headers.items():
+                            if df.columns[ord(col) - ord("A")] != header:
+                                messages.error(
+                                    request,
+                                    f"Неверный заголовок в столбце {col}. Ожидается: {header}",
+                                )
+                                return redirect("admin:index")
+
+                        # Пропускаем первые две строки
+                        df = df.iloc[1:]
+
+                        # Проверяем и пропускаем пустые строки
+                        df = df.dropna(subset=["Госномер", "Контрагент"], how="all")
+                        df = df[df["Госномер"].astype(str).str.strip() != ""]
+                        df = df[df["Контрагент"].astype(str).str.strip() != ""]
+
+                        # Преобразуем даты с явным указанием формата и обработкой ошибок
+                        date_columns = [
+                            "Дата начала проезда",
+                            "Дата окончания проезда",
+                            "Продлен до",
+                        ]
+
+                        for col in date_columns:
+                            try:
+                                # Сначала очищаем данные
+                                df[col] = df[col].astype(str).str.strip()
+                                df[col] = df[col].replace(
+                                    ["nan", "NaN", "", "None"], pd.NaT
+                                )
+
+                                # Пробуем разные форматы дат
+                                def parse_date(x):
+                                    if pd.isna(x) or x is pd.NaT:
+                                        return pd.NaT
+                                    try:
+                                        # Пробуем стандартный формат
+                                        return pd.to_datetime(x, format="%d.%m.%Y")
+                                    except:
+                                        try:
+                                            # Пробуем автоматическое определение формата
+                                            return pd.to_datetime(x)
+                                        except:
+                                            logger.warning(
+                                                f"Не удалось преобразовать дату: {x}"
+                                            )
+                                            return pd.NaT
+
+                                df[col] = df[col].apply(parse_date)
+                                logger.info(
+                                    f"Обработан столбец {col}. Количество валидных дат: {df[col].notna().sum()}"
+                                )
+                            except Exception as e:
+                                logger.error(
+                                    f"Ошибка при обработке столбца {col}: {str(e)}"
+                                )
+                                df[col] = pd.NaT
+
+                        # Обрабатываем данные пакетами
+                        for idx, row in df.iterrows():
+                            try:
+                                company_str = (
+                                    str(row["Контрагент"])
+                                    if pd.notna(row["Контрагент"])
+                                    else ""
+                                )
+                                # Получаем информацию о компании
+                                (
+                                    action_type,
+                                    existing_id,
+                                    companynr,
+                                    company_name,
+                                    old_id,
+                                ) = get_company_info(cursor, company_str)
+
+                                if action_type == "use_existing":
+                                    company_id = existing_id
+                                elif action_type == "reactivate":
+                                    # Деактивируем активные записи
+                                    cursor.execute(
+                                        f"""
+                                        UPDATE {COMPANY_TABLE}
+                                        SET dateactual = CURRENT_DATE
+                                        WHERE companynr = %s AND dateactual IS NULL AND del = 0
+                                        """,
+                                        [companynr],
+                                    )
+
+                                    # Получаем pid от последней записи
+                                    cursor.execute(
+                                        f"""
+                                        SELECT company_id 
+                                        FROM {COMPANY_TABLE}
+                                        WHERE companynr = %s AND del = 0
+                                        ORDER BY company_id DESC
+                                        LIMIT 1
+                                        """,
+                                        [companynr],
+                                    )
+                                    last_record = cursor.fetchone()
+                                    old_company_id = (
+                                        last_record[0] if last_record else None
+                                    )
+
+                                    # Реактивируем запись с pid от последней записи
+                                    cursor.execute(
+                                        f"""
+                                        UPDATE {COMPANY_TABLE}
+                                        SET dateactual = NULL, pid = %s
+                                        WHERE company_id = %s
+                                        """,
+                                        [old_company_id, existing_id],
+                                    )
+                                    company_id = existing_id
+                                else:  # create_new
+                                    # Деактивируем активные записи
+                                    cursor.execute(
+                                        f"""
+                                        UPDATE {COMPANY_TABLE}
+                                        SET dateactual = CURRENT_DATE
+                                        WHERE companynr = %s AND dateactual IS NULL AND del = 0
+                                        """,
+                                        [companynr],
+                                    )
+
+                                    # Получаем pid от последней записи
+                                    cursor.execute(
+                                        f"""
+                                        SELECT company_id 
+                                        FROM {COMPANY_TABLE}
+                                        WHERE companynr = %s AND del = 0
+                                        ORDER BY company_id DESC
+                                        LIMIT 1
+                                        """,
+                                        [companynr],
+                                    )
+                                    last_record = cursor.fetchone()
+                                    old_company_id = (
+                                        last_record[0] if last_record else None
+                                    )
+
+                                    # Создаем новую запись с pid от последней записи
+                                    cursor.execute(
+                                        f"""
+                                        INSERT INTO {COMPANY_TABLE} (company_id, company, del, pid, companynr)
+                                        VALUES (%s, %s, 0, %s, %s)
+                                        """,
+                                        [
+                                            next_company_id,
+                                            company_name,
+                                            old_company_id,
+                                            companynr,
+                                        ],
+                                    )
+                                    company_id = next_company_id
+                                    next_company_id += 1
+
+                                # Добавляем запись пропуска
+                                propusk_values.append(
+                                    (
+                                        next_propusk_id + idx,
+                                        process_plate(
+                                            str(row["Госномер"]).replace(" ", "")
+                                            if pd.notna(row["Госномер"])
+                                            else ""
+                                        ),
+                                        company_id,
+                                        process_dates(row["Дата начала проезда"]),
+                                        process_dates(row["Дата окончания проезда"]),
+                                        (
+                                            str(row["Номер пропуска"])
+                                            if pd.notna(row["Номер пропуска"])
+                                            else None
+                                        ),
+                                        (
+                                            clean_company_name(
+                                                str(row["Договорные отношения"])
+                                            )
+                                            if pd.notna(row["Договорные отношения"])
+                                            else None
+                                        ),
+                                        3,  # tct_id для разовых пропусков
+                                        process_mass(row["Масса авто"]),
+                                        (
+                                            str(row["Марка"])
+                                            if pd.notna(row["Марка"])
+                                            else None
+                                        ),
+                                        process_dates(row["Продлен до"]),
+                                        (
+                                            str(row["Комментарий"])
+                                            if pd.notna(row["Комментарий"])
+                                            else None
+                                        ),
+                                    )
+                                )
+                            except Exception as e:
+                                logger.error(
+                                    f"Ошибка при обработке строки {idx}: {str(e)}"
+                                )
+                                continue
+
+                            # Выполняем пакетную вставку при достижении размера пакета
+                            if len(propusk_values) >= BATCH_SIZE:
+                                execute_batch_insert(
+                                    cursor,
+                                    company_updates,
+                                    company_values,
+                                    propusk_values,
+                                )
+                                company_updates = []
+                                company_values = []
+                                propusk_values = []
+
+                    elif propusk_type == "gdya":
+                        # Проверяем заголовки для списка ГДЯ
+                        required_headers = {
+                            "A": "№ пропуска",
+                            "C": "Транспортное средство",
+                            "D": "Гос. номер",
+                            "E": "Получатель пропуска",
+                            "G": "Срок действия",
+                            "I": "Дата оформления",
+                        }
+
+                        for col, header in required_headers.items():
+                            if df.columns[ord(col) - ord("A")] != header:
+                                messages.error(
+                                    request,
+                                    f"Неверный заголовок в столбце {col}. Ожидается: {header}",
+                                )
+                                return redirect("admin:index")
+
+                        # Преобразуем даты
+                        date_columns = ["Срок действия", "Дата оформления"]
+                        for col in date_columns:
+                            df[col] = pd.to_datetime(
+                                df[col], format="%d.%m.%Y", errors="coerce"
                             )
-                            return redirect("admin:index")
 
-                    # Преобразуем даты
-                    date_columns = ["Срок действия", "Дата оформления"]
-                    for col in date_columns:
-                        df[col] = pd.to_datetime(
-                            df[col], format="%d.%m.%Y", errors="coerce"
-                        )
+                        # Получаем company_id для ГДЯ (companynr = 200) из кэша
+                        gdya_company_id = None
+                        if "200" in existing_companies:
+                            gdya_company_id = existing_companies["200"]["id"]
+                        else:
+                            # Если нет в кэше, создаем новую запись
+                            company_values.append(
+                                (next_company_id, "ГДЯ", 0, None, 200)
+                            )
+                            gdya_company_id = next_company_id
+                            next_company_id += 1
+                            existing_companies["200"] = {
+                                "id": gdya_company_id,
+                                "name": "ГДЯ",
+                            }
 
-                    with connection.cursor() as cursor:
-                        # Получаем следующий propusk_id
-                        next_propusk_id = get_next_id(cursor, "propusk", "propusk_id")
-
-                        # Получаем company_id для ГДЯ (companynr = 200)
-                        cursor.execute(
-                            f"""
-                            SELECT company_id 
-                            FROM {COMPANY_TABLE} 
-                            WHERE companynr = 200 
-                            AND dateactual IS NULL
-                            ORDER BY company_id DESC 
-                            LIMIT 1
-                        """
-                        )
-                        gdya_company = cursor.fetchone()
-                        if not gdya_company:
+                        if not gdya_company_id:
                             messages.error(
                                 request,
                                 "Не найдена запись компании ГДЯ (companynr = 200)",
                             )
                             return redirect("admin:index")
-                        company_id = gdya_company[0]
 
-                        # Обрабатываем каждую строку
+                        # Обрабатываем данные пакетами
                         for idx, row in df.iterrows():
-                            # Преобразуем NaT (Not a Time) в None для SQL
-                            dateb = (
-                                row["Дата оформления"].date()
-                                if pd.notna(row["Дата оформления"])
-                                else None
-                            )
-                            datee = (
-                                row["Срок действия"].date()
-                                if pd.notna(row["Срок действия"])
-                                else None
-                            )
-
-                            # Обработка госномера
-                            gn = process_plate(str(row["Гос. номер"]).replace(" ", ""))
-
-                            # Вставляем запись в propusk
-                            cursor.execute(
-                                f"""
-                                INSERT INTO {PROPUSK_TABLE} (
-                                    propusk_id, gn, company_id, dateb, datee, num,
-                                    contractrelationship, tct_id, mass, marka
-                                ) VALUES (
-                                    %s, %s, %s, %s, %s, %s, %s, %s, %s, %s
-                                )
-                            """,
-                                [
+                            # Добавляем запись пропуска
+                            propusk_values.append(
+                                (
                                     next_propusk_id + idx,
-                                    gn,
-                                    company_id,
-                                    dateb,
-                                    datee,
+                                    process_plate(
+                                        str(row["Гос. номер"]).replace(" ", "")
+                                    ),
+                                    gdya_company_id,
+                                    process_dates(row["Дата оформления"]),
+                                    process_dates(row["Срок действия"]),
                                     row["№ пропуска"],
                                     row["Получатель пропуска"],
-                                    5,  # tct_id = 5 для списка ГДЯ
+                                    5,  # tct_id для списка ГДЯ
                                     0,  # mass = 0
                                     row["Транспортное средство"],
-                                ],
+                                    None,  # prodlen
+                                    None,  # coment
+                                )
                             )
 
-                messages.success(request, "Файл успешно обработан")
-                return redirect("admin:index")
+                            # Выполняем пакетную вставку при достижении размера пакета
+                            if len(propusk_values) >= BATCH_SIZE:
+                                execute_batch_insert(
+                                    cursor,
+                                    company_updates,
+                                    company_values,
+                                    propusk_values,
+                                )
+                                company_updates = []
+                                company_values = []
+                                propusk_values = []
+
+                    # Выполняем оставшиеся вставки
+                    if company_updates or company_values or propusk_values:
+                        execute_batch_insert(
+                            cursor, company_updates, company_values, propusk_values
+                        )
+
+                    # Восстанавливаем индексы
+                    cursor.execute(
+                        f"""
+                        ALTER TABLE {PROPUSK_TABLE} SET LOGGED;
+                        CREATE INDEX IF NOT EXISTS idx_{PROPUSK_TABLE}_gn ON {PROPUSK_TABLE}(gn);
+                        CREATE INDEX IF NOT EXISTS idx_{PROPUSK_TABLE}_company_id ON {PROPUSK_TABLE}(company_id);
+                        CREATE INDEX IF NOT EXISTS idx_{PROPUSK_TABLE}_dateactual ON {PROPUSK_TABLE}(dateactual);
+                        ANALYZE {PROPUSK_TABLE};
+                    """
+                    )
+
+                    connection.commit()
+                    messages.success(request, "Файл успешно обработан")
+                    return redirect("admin:index")
 
             except Exception as e:
                 messages.error(request, f"Ошибка при обработке файла: {str(e)}")
@@ -957,6 +1201,182 @@ def upload_propusk(request):
         form = PropuskUploadForm()
 
     return render(request, "admin/upload_propusk.html", {"form": form})
+
+
+def execute_batch_insert(cursor, company_updates, company_values, propusk_values):
+    """Выполняет пакетную вставку данных"""
+    if company_updates:
+        execute_values(
+            cursor,
+            f"""
+            UPDATE {COMPANY_TABLE}
+            SET dateactual = data.dateactual
+            FROM (VALUES %s) AS data(dateactual, company_id)
+            WHERE {COMPANY_TABLE}.company_id = data.company_id
+        """,
+            company_updates,
+        )
+
+    if company_values:
+        execute_values(
+            cursor,
+            f"""
+            INSERT INTO {COMPANY_TABLE} (company_id, company, del, pid, companynr)
+            VALUES %s
+        """,
+            company_values,
+        )
+
+    if propusk_values:
+        execute_values(
+            cursor,
+            f"""
+            INSERT INTO {PROPUSK_TABLE} (
+                propusk_id, gn, company_id, dateb, datee, num,
+                contractrelationship, tct_id, mass, marka,
+                prodlen, coment
+            ) VALUES %s
+        """,
+            propusk_values,
+        )
+
+
+def get_company_info(cursor, company_str):
+    """
+    Анализирует информацию о компании и возвращает кортеж:
+    (
+        action_type: str,  # Тип действия: 'use_existing', 'reactivate', 'create_new'
+        company_id: int | None,  # ID существующей компании или None
+        companynr: int,  # Номер компании
+        company_name: str,  # Очищенное название компании
+        old_company_id: int | None  # ID старой записи для обновления (если есть)
+    )
+    """
+    company_str = company_str.strip()
+    company_name = None
+    companynr = 0
+
+    # Извлекаем companynr и название из строки
+    match = re.match(r"^(\d+)\.(.+)$", company_str)
+    if match:
+        companynr = int(match.group(1))
+        company_name = " ".join(match.group(2).split())
+    else:
+        company_name = " ".join(company_str.split())
+        companynr = 0
+
+    if companynr == 0:
+        # Для companynr = 0 ищем только по имени
+        cursor.execute(
+            f"""
+            SELECT company_id, company, dateactual, companynr
+            FROM {COMPANY_TABLE}
+            WHERE company = %s AND del = 0
+            ORDER BY dateactual NULLS FIRST, company_id DESC
+            """,
+            [company_name],
+        )
+        existing = cursor.fetchone()
+
+        if existing:
+            company_id, existing_name, dateactual, existing_companynr = existing
+            existing_name = " ".join(existing_name.split())
+
+            # Сценарий 1: Найдена активная запись
+            if dateactual is None and existing_name == company_name:
+                return (
+                    "use_existing",
+                    company_id,
+                    existing_companynr,
+                    company_name,
+                    None,
+                )
+
+            # Сценарий 2: Найдена неактивная запись
+            if dateactual is not None and existing_name == company_name:
+                return (
+                    "reactivate",
+                    company_id,
+                    existing_companynr,
+                    company_name,
+                    None,
+                )
+
+        # Сценарий 3: Запись не найдена
+        cursor.execute(
+            f"""
+            SELECT companynr + 1
+            FROM {COMPANY_TABLE}
+            WHERE companynr NOT IN (0, 1)
+            ORDER BY companynr DESC
+            LIMIT 1
+            """
+        )
+        new_companynr = cursor.fetchone()[0]
+        return ("create_new", None, new_companynr, company_name, None)
+
+    elif companynr == 1:
+        # Для companynr = 1 всегда берем значения из активной системной записи
+        cursor.execute(
+            f"""
+            SELECT company_id, company, companynr
+            FROM {COMPANY_TABLE}
+            WHERE companynr = 1 AND dateactual IS NULL AND del = 0
+            """
+        )
+        system_record = cursor.fetchone()
+        if system_record:
+            return (
+                "use_existing",
+                system_record[0],
+                system_record[2],
+                system_record[1],
+                None,
+            )
+        else:
+            raise ValueError(
+                "Системная запись с companynr = 1 не найдена или неактивна"
+            )
+
+    else:
+        # Для companynr ≠ 0 ищем по companynr
+        cursor.execute(
+            f"""
+            SELECT company_id, company, dateactual, companynr
+            FROM {COMPANY_TABLE}
+            WHERE companynr = %s AND del = 0
+            ORDER BY dateactual NULLS FIRST, company_id DESC
+            """,
+            [companynr],
+        )
+        existing = cursor.fetchone()
+
+        if existing:
+            company_id, existing_name, dateactual, existing_companynr = existing
+            existing_name = " ".join(existing_name.split())
+
+            # Сценарий 1: Найдена активная запись с тем же именем
+            if dateactual is None and existing_name == company_name:
+                return (
+                    "use_existing",
+                    company_id,
+                    existing_companynr,
+                    company_name,
+                    None,
+                )
+
+            # Сценарий 2: Найдена неактивная запись с тем же именем
+            if dateactual is not None and existing_name == company_name:
+                return (
+                    "reactivate",
+                    company_id,
+                    existing_companynr,
+                    company_name,
+                    None,
+                )
+
+        # Сценарий 3: Найдена запись с другим именем или запись не найдена
+        return ("create_new", None, companynr, company_name, None)
 
 
 def get_vehicle_category(mass):
@@ -1055,43 +1475,34 @@ def generate_report(request):
                 "Сумма",
             ]
 
-            # Заполняем заголовки для полного отчета
-            for col, header in enumerate(headers, 1):
-                cell = ws.cell(row=1, column=col)
+            # Заполняем заголовки и устанавливаем ширину столбцов
+            for idx, header in enumerate(headers, 1):
+                cell = ws.cell(row=1, column=idx)
                 cell.value = header
                 cell.font = header_font
                 cell.alignment = center_alignment
                 cell.border = thin_border
 
-            # Заполняем заголовки для упрощенного отчета
-            for col, header in enumerate(headers_simple, 1):
-                cell = ws_simple.cell(row=1, column=col)
+            for idx, header in enumerate(headers_simple, 1):
+                cell = ws_simple.cell(row=1, column=idx)
                 cell.value = header
                 cell.font = header_font
                 cell.alignment = center_alignment
                 cell.border = thin_border
 
-            # Устанавливаем ширину столбцов для полного отчета
+            # Устанавливаем ширину столбцов
             column_widths = {
-                1: 15,  # Гос. номер
-                2: 12,  # № фиксации
-                3: 20,  # Фиксация на камере
-                4: 20,  # Дата фиксации
-                5: 30,  # Перевозчик
-                6: 30,  # Выбранный перевозчик
-                7: 15,  # Категория
-                8: 15,  # Тариф
-                9: 15,  # Сумма
+                1: 15,
+                2: 12,
+                3: 20,
+                4: 20,
+                5: 30,
+                6: 30,
+                7: 15,
+                8: 15,
+                9: 15,
             }
-
-            # Устанавливаем ширину столбцов для упрощенного отчета
-            column_widths_simple = {
-                1: 15,  # Гос. номер
-                2: 15,  # Кол-во фиксаций
-                3: 30,  # Перевозчик
-                4: 30,  # Выбранный перевозчик
-                5: 15,  # Сумма
-            }
+            column_widths_simple = {1: 15, 2: 15, 3: 30, 4: 30, 5: 15}
 
             for col, width in column_widths.items():
                 ws.column_dimensions[get_column_letter(col)].width = width
@@ -1100,326 +1511,190 @@ def generate_report(request):
                 ws_simple.column_dimensions[get_column_letter(col)].width = width
 
             with connection.cursor() as cursor:
+                # Получаем все действующие пропуска одним запросом
                 cursor.execute(
                     f"""
-                    SELECT DISTINCT gn 
-                    FROM {PROPUSK_TABLE} 
-                    WHERE gn IS NOT NULL
-                """
+                    WITH valid_numbers AS (
+                        SELECT DISTINCT gn, mass, company_id, tct_id
+                        FROM {PROPUSK_TABLE}
+                        WHERE gn IS NOT NULL AND dateactual IS NULL
+                    ),
+                    company_info AS (
+                        SELECT c.company_id, c.company, c.companynr
+                        FROM {COMPANY_TABLE} c
+                        WHERE c.del = 0 AND c.dateactual IS NULL
+                    )
+                    SELECT
+                        vn.gn,
+                        vn.mass,
+                        vn.company_id,
+                        vn.tct_id,
+                        ci.company
+                    FROM valid_numbers vn
+                    LEFT JOIN company_info ci ON vn.company_id = ci.company_id
+                    """
                 )
-                valid_numbers = {row[0].upper() for row in cursor.fetchall()}
+                propusk_data = {
+                    row[0].upper(): {
+                        "mass": row[1],
+                        "company_id": row[2],
+                        "tct_id": row[3],
+                        "company": row[4],
+                    }
+                    for row in cursor.fetchall()
+                }
 
-                # Получаем данные о массе для действующих пропусков и информацию о компаниях
+                # Получаем данные потока за выбранный месяц с группировкой
                 cursor.execute(
                     f"""
-                    SELECT p.gn, p.mass, p.company_id, p.tct_id, c.company, p.dateb, p.datee
-                    FROM {PROPUSK_TABLE} p
-                    LEFT JOIN {COMPANY_TABLE} c ON p.company_id = c.company_id
-                    WHERE p.gn IS NOT NULL 
-                    AND p.dateactual IS NULL
-                    ORDER BY p.gn, p.tct_id, c.company
-                """
-                )
-                vehicle_masses = {}
-                vehicle_companies = defaultdict(lambda: defaultdict(list))
-                vehicle_tct_ids = defaultdict(set)
-                vehicle_companies_by_tct = defaultdict(lambda: defaultdict(list))
-                for row in cursor.fetchall():
-                    gn, mass, company_id, tct_id, company, dateb, datee = row
-                    gn = gn.upper()
-                    vehicle_masses[gn] = mass
-                    if company:  # Добавляем компанию только если она существует
-                        vehicle_companies[gn]["dates"].append((dateb, datee))
-                        vehicle_companies[gn]["companies"].append(company)
-                    if tct_id:  # Сохраняем tct_id и компании для каждого tct_id
-                        vehicle_tct_ids[gn].add(tct_id)
-                        vehicle_companies_by_tct[gn][tct_id].append(
-                            {"company": company, "dateb": dateb, "datee": datee}
-                        )
-
-                # Получаем данные потока за выбранный месяц
-                cursor.execute(
-                    f"""
-                    WITH RankedRecords AS (
-                        SELECT 
+                    WITH filtered_data AS (
+                        SELECT
                             gosnmr,
                             camera,
                             direction,
                             dt,
                             LAG(dt) OVER (PARTITION BY gosnmr ORDER BY dt) as prev_dt
                         FROM {POTOK_TABLE}
-                        WHERE 
-                            EXTRACT(YEAR FROM dt) = %s 
+                        WHERE
+                            EXTRACT(YEAR FROM dt) = %s
                             AND EXTRACT(MONTH FROM dt) = %s
                             AND del IS NULL
-                        ORDER BY gosnmr, dt
+                    ),
+                    valid_records AS (
+                        SELECT *
+                        FROM filtered_data
+                        WHERE prev_dt IS NULL OR dt - prev_dt >= interval '24 hours'
                     )
-                    SELECT * FROM RankedRecords
-                """,
+                    SELECT
+                        gosnmr,
+                        COUNT(*) as fixation_count,
+                        array_agg(camera) as cameras,
+                        array_agg(direction) as directions,
+                        array_agg(dt) as dates
+                    FROM valid_records
+                    GROUP BY gosnmr
+                    ORDER BY gosnmr
+                    """,
                     [report_date.year, report_date.month],
                 )
 
                 current_row = 2
                 current_row_simple = 2
-                current_number = None
-                fixation_count = 0
-                merge_start_row = 2
-                merge_start_row_simple = 2
 
+                # Обрабатываем результаты
                 for row in cursor.fetchall():
-                    gosnmr, camera, direction, dt, prev_dt = row
+                    gosnmr, fixation_count, cameras, directions, dates = row
+                    upper_gosnmr = gosnmr.upper()
 
-                    # Пропускаем запись если прошло менее 24 часов с предыдущей
-                    if prev_dt and (dt - prev_dt) < timedelta(hours=24):
-                        continue
+                    # Получаем информацию о пропуске
+                    propusk_info = propusk_data.get(upper_gosnmr, {})
+                    mass = propusk_info.get("mass")
+                    company = propusk_info.get("company", "")
 
-                    # Если новый номер, объединяем предыдущие ячейки и обновляем счетчик
-                    if gosnmr != current_number:
-                        # Объединяем ячейки для предыдущего номера в полном отчете
-                        if current_number and current_row > merge_start_row:
-                            for col in [1, 5, 6, 7, 8, 9]:  # Столбцы для объединения
-                                ws.merge_cells(
-                                    start_row=merge_start_row,
-                                    start_column=col,
-                                    end_row=current_row - 1,
-                                    end_column=col,
-                                )
-                                # Устанавливаем выравнивание для объединенной ячейки
-                                merged_cell = ws.cell(row=merge_start_row, column=col)
-                                merged_cell.alignment = Alignment(
-                                    horizontal="center", vertical="center"
-                                )
+                    # Определяем категорию и тариф
+                    category = get_vehicle_category(mass)
+                    tariff = tariffs.get(category, 0) if category else 0
+                    total_sum = tariff * fixation_count if tariff else 0
 
-                            # Добавляем запись в упрощенный отчет (только максимальная фиксация)
-                            ws_simple.cell(row=current_row_simple, column=1).value = (
-                                current_number
-                            )
-                            ws_simple.cell(row=current_row_simple, column=2).value = (
-                                fixation_count
-                            )
-
-                            # Копируем значения из полного отчета
-                            for src_col, dst_col in [(5, 3), (6, 4), (9, 5)]:
-                                cell_value = ws.cell(
-                                    row=merge_start_row, column=src_col
-                                ).value
-                                ws_simple.cell(
-                                    row=current_row_simple, column=dst_col
-                                ).value = cell_value
-
-                            # Форматируем ячейки в упрощенном отчете
-                            for col in range(1, 6):
-                                cell = ws_simple.cell(
-                                    row=current_row_simple, column=col
-                                )
-                                cell.alignment = center_alignment
-                                cell.border = thin_border
-                                if (
-                                    col == 1
-                                    and current_number.upper() not in valid_numbers
-                                ):
-                                    cell.fill = red_fill
-
-                            current_row_simple += 1
-
-                        current_number = gosnmr
-                        fixation_count = 1
-                        merge_start_row = current_row
-                    else:
-                        fixation_count += 1
-
-                    # Записываем данные
-                    # Гос. номер (только для первой строки номера)
-                    if merge_start_row == current_row:
-                        cell = ws.cell(row=current_row, column=1)
+                    # Записываем в полный отчет
+                    for i in range(fixation_count):
+                        # Гос. номер
+                        cell = ws.cell(row=current_row + i, column=1)
                         cell.value = gosnmr
+                        if i == 0:  # Только для первой строки номера
+                            if upper_gosnmr not in propusk_data:
+                                cell.fill = red_fill
                         cell.alignment = center_alignment
                         cell.border = thin_border
 
-                        upper_gosnmr = gosnmr.upper()
-                        if upper_gosnmr not in valid_numbers:
-                            cell.fill = red_fill
+                        # № фиксации
+                        ws.cell(
+                            row=current_row + i, column=2, value=i + 1
+                        ).alignment = center_alignment
 
-                        # Создаем ячейку категории с форматированием
-                        category_cell = ws.cell(
-                            row=current_row, column=7
-                        )  # Столбец категории
-                        category_cell.alignment = center_alignment
-                        category_cell.border = thin_border
-
-                        # Создаем ячейку тарифа с форматированием
-                        tariff_cell = ws.cell(
-                            row=current_row, column=8
-                        )  # Столбец тарифа
-                        tariff_cell.alignment = center_alignment
-                        tariff_cell.border = thin_border
-
-                        # Создаем ячейку суммы с форматированием
-                        sum_cell = ws.cell(row=current_row, column=9)  # Столбец суммы
-                        sum_cell.alignment = center_alignment
-                        sum_cell.border = thin_border
-
-                        # Заполняем значение категории, компаний, выбранного перевозчика, тарифа и суммы если номер есть в действующих пропусках
-                        if upper_gosnmr in vehicle_masses:
-                            mass = vehicle_masses[upper_gosnmr]
-                            category = get_vehicle_category(mass)
-                            category_cell.value = category
-
-                            # Заполняем список компаний
-                            companies_cell = ws.cell(
-                                row=current_row, column=5
-                            )  # Столбец перевозчика
-                            valid_companies = []
-                            if upper_gosnmr in vehicle_companies:
-                                for i, (dateb, datee) in enumerate(
-                                    vehicle_companies[upper_gosnmr]["dates"]
-                                ):
-                                    # Проверяем, попадает ли дата фиксации в период действия пропуска
-                                    if (dateb is None or dt.date() >= dateb) and (
-                                        datee is None or dt.date() <= datee
-                                    ):
-                                        valid_companies.append(
-                                            vehicle_companies[upper_gosnmr][
-                                                "companies"
-                                            ][i]
-                                        )
-
-                            companies_cell.value = ", ".join(valid_companies)
-                            companies_cell.alignment = center_alignment
-                            companies_cell.border = thin_border
-
-                            # Заполняем выбранного перевозчика (с наименьшим tct_id)
-                            selected_companies_cell = ws.cell(
-                                row=current_row, column=6
-                            )  # Столбец выбранного перевозчика
-                            if upper_gosnmr in vehicle_companies_by_tct:
-                                valid_companies_by_tct = defaultdict(list)
-                                # Проходим по всем tct_id и компаниям
-                                for tct_id, companies in vehicle_companies_by_tct[
-                                    upper_gosnmr
-                                ].items():
-                                    for company_data in companies:
-                                        dateb = company_data["dateb"]
-                                        datee = company_data["datee"]
-                                        # Проверяем, попадает ли дата фиксации в период действия пропуска
-                                        if (dateb is None or dt.date() >= dateb) and (
-                                            datee is None or dt.date() <= datee
-                                        ):
-                                            valid_companies_by_tct[tct_id].append(
-                                                company_data["company"]
-                                            )
-
-                                # Если есть действующие компании, берем те, что с минимальным tct_id
-                                if valid_companies_by_tct:
-                                    min_tct_id = min(valid_companies_by_tct.keys())
-                                    selected_companies_cell.value = ", ".join(
-                                        valid_companies_by_tct[min_tct_id]
-                                    )
-
-                            selected_companies_cell.alignment = center_alignment
-                            selected_companies_cell.border = thin_border
-
-                            # Заполняем тариф соответствующий категории
-                            if category in tariffs:
-                                tariff = tariffs[category]
-                                tariff_cell.value = f"{tariff:.2f}"
-
-                                # Считаем количество фиксаций для этого номера
-                                cursor.execute(
-                                    f"""
-                                    WITH RankedRecords AS (
-                                        SELECT 
-                                            dt,
-                                            LAG(dt) OVER (ORDER BY dt) as prev_dt
-                                        FROM {POTOK_TABLE}
-                                        WHERE 
-                                            gosnmr = %s
-                                            AND EXTRACT(YEAR FROM dt) = %s 
-                                            AND EXTRACT(MONTH FROM dt) = %s
-                                            AND del IS NULL
-                                        ORDER BY dt
-                                    )
-                                    SELECT COUNT(*) 
-                                    FROM RankedRecords
-                                    WHERE prev_dt IS NULL OR dt - prev_dt >= interval '24 hours'
-                                """,
-                                    [gosnmr, report_date.year, report_date.month],
-                                )
-
-                                total_fixations = cursor.fetchone()[0]
-                                # Рассчитываем сумму и записываем в ячейку
-                                total_sum = tariff * total_fixations
-                                sum_cell.value = f"{total_sum:.2f}"
-
-                        # Добавляем пустые значения для остальных новых столбцов
-                        for col in [
-                            5,
-                            6,
-                        ]:  # Пропускаем столбцы категории (7) и тарифа (8)
-                            cell = ws.cell(row=current_row, column=col)
-                            cell.alignment = center_alignment
-                            cell.border = thin_border
-
-                    # № фиксации
-                    cell = ws.cell(row=current_row, column=2)
-                    cell.value = fixation_count
-                    cell.alignment = center_alignment
-                    cell.border = thin_border
-
-                    # Фиксация на камере
-                    cell = ws.cell(row=current_row, column=3)
-                    cell.value = f"{camera} ({direction})"
-                    cell.alignment = center_alignment
-                    cell.border = thin_border
-
-                    # Дата фиксации
-                    cell = ws.cell(row=current_row, column=4)
-                    cell.value = dt.strftime("%d.%m.%Y %H:%M:%S")
-                    cell.alignment = center_alignment
-                    cell.border = thin_border
-
-                    current_row += 1
-
-                # Объединяем ячейки для последнего номера в полном отчете
-                if current_number and current_row > merge_start_row:
-                    for col in [1, 5, 6, 7, 8, 9]:  # Столбцы для объединения
-                        ws.merge_cells(
-                            start_row=merge_start_row,
-                            start_column=col,
-                            end_row=current_row - 1,
-                            end_column=col,
+                        # Камера
+                        camera_info = (
+                            f"{cameras[i]} ({directions[i]})"
+                            if directions[i]
+                            else cameras[i]
                         )
-                        # Устанавливаем выравнивание для объединенной ячейки
-                        merged_cell = ws.cell(row=merge_start_row, column=col)
-                        merged_cell.alignment = Alignment(
-                            horizontal="center", vertical="center"
+                        ws.cell(
+                            row=current_row + i, column=3, value=camera_info
+                        ).alignment = center_alignment
+
+                        # Дата фиксации
+                        ws.cell(
+                            row=current_row + i,
+                            column=4,
+                            value=dates[i].strftime("%d.%m.%Y %H:%M:%S"),
+                        ).alignment = center_alignment
+
+                        # Остальные поля только для первой строки
+                        if i == 0:
+                            # Перевозчик
+                            ws.cell(
+                                row=current_row, column=5, value=company
+                            ).alignment = center_alignment
+                            # Выбранный перевозчик
+                            ws.cell(
+                                row=current_row, column=6, value=company
+                            ).alignment = center_alignment
+                            # Категория
+                            ws.cell(
+                                row=current_row, column=7, value=category
+                            ).alignment = center_alignment
+                            # Тариф
+                            ws.cell(
+                                row=current_row, column=8, value=f"{tariff:.2f}"
+                            ).alignment = center_alignment
+                            # Сумма
+                            ws.cell(
+                                row=current_row, column=9, value=f"{total_sum:.2f}"
+                            ).alignment = center_alignment
+
+                    # Объединяем ячейки для одинаковых значений
+                    if fixation_count > 1:
+                        for col in [1, 5, 6, 7, 8, 9]:
+                            ws.merge_cells(
+                                start_row=current_row,
+                                start_column=col,
+                                end_row=current_row + fixation_count - 1,
+                                end_column=col,
+                            )
+
+                    # Записываем в упрощенный отчет
+                    ws_simple.cell(
+                        row=current_row_simple, column=1, value=gosnmr
+                    ).alignment = center_alignment
+                    if upper_gosnmr not in propusk_data:
+                        ws_simple.cell(row=current_row_simple, column=1).fill = red_fill
+                    ws_simple.cell(
+                        row=current_row_simple, column=2, value=fixation_count
+                    ).alignment = center_alignment
+                    ws_simple.cell(
+                        row=current_row_simple, column=3, value=company
+                    ).alignment = center_alignment
+                    ws_simple.cell(
+                        row=current_row_simple, column=4, value=company
+                    ).alignment = center_alignment
+                    ws_simple.cell(
+                        row=current_row_simple, column=5, value=f"{total_sum:.2f}"
+                    ).alignment = center_alignment
+
+                    # Добавляем границы для упрощенного отчета
+                    for col in range(1, 6):
+                        ws_simple.cell(row=current_row_simple, column=col).border = (
+                            thin_border
                         )
 
-                # Добавляем последнюю запись в упрощенный отчет
-                ws_simple.cell(row=current_row_simple, column=1).value = current_number
-                ws_simple.cell(row=current_row_simple, column=2).value = fixation_count
-
-                # Копируем значения из полного отчета
-                for src_col, dst_col in [(5, 3), (6, 4), (9, 5)]:
-                    cell_value = ws.cell(row=merge_start_row, column=src_col).value
-                    ws_simple.cell(row=current_row_simple, column=dst_col).value = (
-                        cell_value
-                    )
-
-                # Форматируем ячейки в упрощенном отчете
-                for col in range(1, 6):
-                    cell = ws_simple.cell(row=current_row_simple, column=col)
-                    cell.alignment = center_alignment
-                    cell.border = thin_border
-                    if col == 1 and current_number.upper() not in valid_numbers:
-                        cell.fill = red_fill
+                    current_row += fixation_count
+                    current_row_simple += 1
 
             # Сохраняем файлы
             filename = f'Анализ_потока_{report_date.strftime("%m_%Y")}.xlsx'
             filename_simple = (
                 f'Анализ_потока_краткий_{report_date.strftime("%m_%Y")}.xlsx'
             )
-
             filepath = os.path.join("media", filename)
             filepath_simple = os.path.join("media", filename_simple)
 
@@ -1427,47 +1702,34 @@ def generate_report(request):
             wb.save(filepath)
             wb_simple.save(filepath_simple)
 
-            try:
-                # Создаем ZIP-архив с обоими файлами
-                zip_filename = f'Анализ_потока_{report_date.strftime("%m_%Y")}.zip'
-                zip_filepath = os.path.join("media", zip_filename)
+            # Создаем ZIP-архив
+            zip_filename = f'Анализ_потока_{report_date.strftime("%m_%Y")}.zip'
+            zip_filepath = os.path.join("media", zip_filename)
 
-                import zipfile
+            with zipfile.ZipFile(zip_filepath, "w") as zipf:
+                zipf.write(filepath, os.path.basename(filepath))
+                zipf.write(filepath_simple, os.path.basename(filepath_simple))
 
-                with zipfile.ZipFile(zip_filepath, "w") as zipf:
-                    zipf.write(filepath, os.path.basename(filepath))
-                    zipf.write(filepath_simple, os.path.basename(filepath_simple))
+            # Отправляем ZIP-архив
+            response = FileResponse(
+                open(zip_filepath, "rb"),
+                content_type="application/zip",
+                as_attachment=True,
+                filename="zip_filename",
+            )
 
-                # Отправляем ZIP-архив пользователю
-                response = FileResponse(
-                    open(zip_filepath, "rb"),
-                    content_type="application/zip",
-                    as_attachment=True,
-                    filename=zip_filename,
-                )
-
-                # Добавляем callback для удаления файлов после отправки
-                def cleanup():
-                    for f in [filepath, filepath_simple, zip_filepath]:
-                        if os.path.exists(f):
-                            os.remove(f)
-                            logger.info(f"Временный файл {f} удален")
-
-                response._resource_closers.append(cleanup)
-
-                return response
-
-            except Exception as e:
-                # В случае ошибки удаляем все созданные файлы
+            # Добавляем callback для удаления файлов
+            def cleanup():
                 for f in [filepath, filepath_simple, zip_filepath]:
                     if os.path.exists(f):
                         os.remove(f)
-                        logger.info(f"Временный файл {f} удален после ошибки")
-                messages.error(request, f"Ошибка при формировании отчета: {str(e)}")
-                return redirect("admin:index")
+                        logger.info(f"Временный файл {f} удален")
+
+            response._resource_closers.append(cleanup)
+            return response
 
         except Exception as e:
-            # В случае ошибки также проверяем и удаляем файлы
+            # В случае ошибки удаляем файлы
             for f in (
                 [filepath, filepath_simple, zip_filepath]
                 if "filepath" in locals()
@@ -1480,7 +1742,6 @@ def generate_report(request):
             return redirect("admin:index")
 
     else:
-        # Добавляем значения по умолчанию в контекст
         context = {
             "default_date": datetime.now().strftime("%Y-%m"),
             "default_tariffs": {
@@ -1491,3 +1752,11 @@ def generate_report(request):
             },
         }
         return render(request, "admin/generate_report.html", context)
+
+
+def clean_company_name(name):
+    """Очищает название компании от номера в формате N."""
+    if not name or not isinstance(name, str):
+        return name
+    match = re.match(r"^\d+\.(.*)", name.strip())
+    return match.group(1).strip() if match else name.strip()

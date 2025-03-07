@@ -24,14 +24,16 @@
                         Схожесть
                         <span id="sort-indicator">▼</span>
                     </th>
-                    <th>Выбрать</th>
+                    <th>
+                        <input type="checkbox" id="select-all" title="Выбрать все">
+                    </th>
                 </tr>
             </thead>
             <tbody></tbody>
         </table>
         
         <button id="replace-selected" style="display: none; margin-top: 20px;" class="button">
-            Заменить выбранные номера
+            Заменить выбранные номера (<span id="selected-count">0</span>)
         </button>
     </div>
 </div>
@@ -43,13 +45,31 @@ document.addEventListener('DOMContentLoaded', function() {
     const tableEl = document.getElementById('results-table');
     const replaceBtn = document.getElementById('replace-selected');
     const tbody = tableEl.querySelector('tbody');
+    const selectAllCheckbox = document.getElementById('select-all');
+    const selectedCountSpan = document.getElementById('selected-count');
     const csrfToken = document.querySelector('[name=csrfmiddlewaretoken]').value;
     let sortAscending = false; // По умолчанию сортируем по убыванию
+    
+    // Функция обновления счетчика выбранных элементов
+    function updateSelectedCount() {
+        const selectedCount = document.querySelectorAll('tbody input[type="checkbox"]:checked').length;
+        selectedCountSpan.textContent = selectedCount;
+    }
+    
+    // Обработчик выбора всех элементов
+    selectAllCheckbox.addEventListener('change', function() {
+        const checkboxes = document.querySelectorAll('tbody input[type="checkbox"]');
+        checkboxes.forEach(checkbox => {
+            checkbox.checked = selectAllCheckbox.checked;
+        });
+        updateSelectedCount();
+    });
     
     // Функция для загрузки данных с сервера
     function loadData(isSort = false) {
         loadingEl.style.display = 'block';
         errorEl.style.display = 'none';
+        selectAllCheckbox.checked = false; // Сбрасываем общий чекбокс при перезагрузке данных
         
         // Формируем URL в зависимости от типа запроса
         const url = isSort ? `?sort=true&sort_ascending=${sortAscending}` : '';
@@ -89,13 +109,15 @@ document.addEventListener('DOMContentLoaded', function() {
                         <td>
                             <input type="checkbox" data-id="${result.id}" 
                                    data-original="${result.original}" 
-                                   data-suggested="${result.suggested}">
+                                   data-suggested="${result.suggested}"
+                                   onchange="updateSelectedCount()">
                         </td>
                     `;
                     tbody.appendChild(row);
                 });
                 tableEl.style.display = 'table';
                 replaceBtn.style.display = 'block';
+                updateSelectedCount();
             } else {
                 errorEl.textContent = 'Нет номеров для замены';
                 errorEl.style.display = 'block';
@@ -121,7 +143,7 @@ document.addEventListener('DOMContentLoaded', function() {
     
     // Обработка нажатия на кнопку замены
     replaceBtn.addEventListener('click', function() {
-        const selected = Array.from(document.querySelectorAll('input[type="checkbox"]:checked'))
+        const selected = Array.from(document.querySelectorAll('tbody input[type="checkbox"]:checked'))
             .map(cb => ({
                 id: cb.dataset.id,
                 original: cb.dataset.original,
@@ -177,5 +199,11 @@ document.addEventListener('DOMContentLoaded', function() {
         });
     });
 });
+
+// Глобальная функция для обновления счетчика (используется в onchange чекбоксов)
+function updateSelectedCount() {
+    const selectedCount = document.querySelectorAll('tbody input[type="checkbox"]:checked').length;
+    document.getElementById('selected-count').textContent = selectedCount;
+}
 </script>
 {% endblock %} 
