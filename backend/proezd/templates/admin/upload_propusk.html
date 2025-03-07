@@ -2,8 +2,10 @@
 {% load i18n static %}
 
 {% block content %}
+{% include "admin/components/loader.html" %}
+
 <div id="content-main">
-    <form method="post" enctype="multipart/form-data">
+    <form method="post" enctype="multipart/form-data" id="upload-form">
         {% csrf_token %}
         <fieldset class="module aligned">
             {% for field in form %}
@@ -22,4 +24,28 @@
         </div>
     </form>
 </div>
+
+<script>
+    document.addEventListener('DOMContentLoaded', function() {
+        const form = document.getElementById('upload-form');
+        
+        form.addEventListener('submit', function(e) {
+            window.showLoader();
+            
+            // Отключаем кнопку отправки формы
+            const submitButton = form.querySelector('input[type="submit"]');
+            if (submitButton) {
+                submitButton.disabled = true;
+            }
+            
+            // Если форма отправляется с ошибкой, скрываем лоадер
+            window.addEventListener('error', function() {
+                window.hideLoader();
+                if (submitButton) {
+                    submitButton.disabled = false;
+                }
+            });
+        });
+    });
+</script>
 {% endblock %} 

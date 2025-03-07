@@ -2,6 +2,19 @@
 {% load i18n static %}
 
 {% block content %}
+    <!-- Модальное окно подтверждения -->
+    <div id="confirmModal" class="modal" style="display: none; position: fixed; z-index: 1000; left: 0; top: 0; width: 100%; height: 100%; background-color: rgba(0,0,0,0.7);">
+        <div class="modal-content" style="background: var(--darkened-bg); margin: 15% auto; padding: 25px; border: 1px solid var(--border-color); width: 80%; max-width: 500px; border-radius: 8px; box-shadow: 0 4px 12px rgba(0,0,0,0.2); color: var(--body-fg);">
+            <h3 style="margin-top: 0; color: var(--header-link-color); font-size: 1.3em;">Подтверждение действия</h3>
+            <p style="margin: 15px 0; font-size: 1.1em;">Вы уверены, что хотите начать анализ и замену неверно распознанных номеров?</p>
+            <p style="margin-top: 10px; color: var(--body-quiet-color);">Этот процесс может занять некоторое время.</p>
+            <div style="text-align: right; margin-top: 25px;">
+                <button class="button" style="background: var(--close-button-bg); color: var(--body-fg); border: 1px solid var(--border-color); padding: 8px 15px; border-radius: 4px; cursor: pointer;" onclick="closeModal()">Отмена</button>
+                <button class="button" style="margin-left: 10px; background: var(--primary); color: white; border: none; padding: 8px 15px; border-radius: 4px; cursor: pointer; font-weight: 500;" onclick="confirmAction()">Продолжить</button>
+            </div>
+        </div>
+    </div>
+
     {% if upload_button %}
     <div class="module">
         <h2>Загрузка данных</h2>
@@ -16,4 +29,28 @@
     {% endif %}
 
     {{ block.super }}
+
+    <script>
+    document.addEventListener('DOMContentLoaded', function() {
+        const modal = document.getElementById('confirmModal');
+        let targetUrl = '';
+
+        const analyzeButton = document.querySelector('a.button[href$="analyze-numbers/"]');
+        if (analyzeButton) {
+            analyzeButton.addEventListener('click', function(e) {
+                e.preventDefault();
+                targetUrl = this.href;
+                modal.style.display = 'block';
+            });
+        }
+
+        window.closeModal = function() {
+            modal.style.display = 'none';
+        }
+
+        window.confirmAction = function() {
+            window.location.href = targetUrl;
+        }
+    });
+    </script>
 {% endblock %} 

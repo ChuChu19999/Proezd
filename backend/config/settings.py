@@ -109,7 +109,6 @@ DEFAULT_AUTO_FIELD = "django.db.models.BigAutoField"
 
 INTERNAL_IPS = ["127.0.0.1", "10.49.24.44"]
 
-# Celery Configuration
 CELERY_BROKER_URL = os.getenv("CELERY_BROKER_URL")
 RESULT_BACKEND = os.getenv("CELERY_RESULT_BACKEND")
 ACCEPT_CONTENT = ["json"]

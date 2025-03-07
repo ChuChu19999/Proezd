@@ -344,7 +344,6 @@ def analyze_numbers_task():
                     f"Подготовлены индексы для поиска. Длины номеров: {len(ref_data[0])}, Префиксы: {len(ref_data[1])}"
                 )
 
-                # Получаем общее количество записей
                 cursor.execute(
                     f"""
                     SELECT COUNT(*)
@@ -357,7 +356,6 @@ def analyze_numbers_task():
                 total_records = cursor.fetchone()[0]
                 logger.info(f"Всего записей для обработки: {total_records}")
 
-                # Обрабатываем данные пакетами
                 BATCH_SIZE = 500
                 processed_records = 0
                 all_results = []
@@ -386,7 +384,6 @@ def analyze_numbers_task():
                             f"Начало обработки пакета {processed_records + 1}-{processed_records + len(batch_data)} из {total_records} записей"
                         )
 
-                        # Обработка пакета
                         batch_results = process_numbers(batch_data, ref_data, 0.6)
                         all_results.extend(batch_results)
                         logger.info(

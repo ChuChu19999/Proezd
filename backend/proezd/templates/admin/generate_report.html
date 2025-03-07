@@ -2,9 +2,11 @@
 {% load i18n static %}
 
 {% block content %}
+{% include "admin/components/loader.html" %}
+
 <div class="module">
     <h2>Формирование отчета</h2>
-    <form method="post">
+    <form method="post" id="report-form" target="_blank">
         {% csrf_token %}
         <div style="margin: 20px 0;">
             <label for="report_date">Выберите месяц и год:</label>
@@ -69,36 +71,82 @@ document.addEventListener('DOMContentLoaded', function() {
         e.target.value = e.target.value.replace(/[^\d,]/g, '');
     }
 
-    // Добавляем обработчики для всех полей тарифов
+    // Обработчики для всех полей тарифов
     ['tariff_1', 'tariff_2', 'tariff_3', 'tariff_4'].forEach(id => {
         const input = document.getElementById(id);
         input.addEventListener('input', handleInput);
-        
-        // Сохраняем оригинальное значение при загрузке
         input.dataset.originalValue = input.value;
+    });
+
+    const form = document.getElementById('report-form');
+    
+    form.addEventListener('submit', async function(e) {
+        e.preventDefault(); // Предотвращаем стандартную отправку формы
         
-        // Преобразуем значение перед отправкой формы
-        input.form.addEventListener('submit', function() {
-            // Создаем скрытое поле для отправки значения с точкой
-            const hiddenInput = document.createElement('input');
-            hiddenInput.type = 'hidden';
-            hiddenInput.name = input.name;
-            hiddenInput.value = input.value.replace(',', '.');
-            input.form.appendChild(hiddenInput);
-            
-            // Возвращаем оригинальное значение с запятой
-            input.value = input.dataset.originalValue;
-            
-            // Отключаем оригинальное поле
-            input.disabled = true;
-        });
+        // Показываем лоадер
+        window.showLoader();
         
-        // Восстанавливаем поле после отправки
-        input.form.addEventListener('submit', function() {
-            setTimeout(() => {
-                input.disabled = false;
-            }, 100);
-        });
+        // Отключаем кнопку отправки формы
+        const submitButton = form.querySelector('input[type="submit"]');
+        if (submitButton) {
+            submitButton.disabled = true;
+        }
+
+        try {
+            const formData = new FormData(form);
+            
+            // Преобразуем значения тарифов
+            ['tariff_1', 'tariff_2', 'tariff_3', 'tariff_4'].forEach(id => {
+                const input = document.getElementById(id);
+                formData.set(id, input.value.replace(',', '.'));
+            });
+
+            const response = await fetch(form.action || window.location.href, {
+                method: 'POST',
+                body: formData,
+                headers: {
+                    'X-CSRFToken': document.querySelector('[name=csrfmiddlewaretoken]').value
+                }
+            });
+
+            if (response.ok) {
+                const blob = await response.blob();
+                
+                // Создаем ссылку для скачивания
+                const url = window.URL.createObjectURL(blob);
+                const a = document.createElement('a');
+                a.style.display = 'none';
+                a.href = url;
+                
+                // Получаем имя файла из заголовков или используем стандартное
+                const contentDisposition = response.headers.get('Content-Disposition');
+                const filenameMatch = contentDisposition && contentDisposition.match(/filename="?([^"]+)"?/);
+                a.download = filenameMatch ? filenameMatch[1] : 'Анализ_потока.zip';
+                
+                document.body.appendChild(a);
+                a.click();
+                window.URL.revokeObjectURL(url);
+            } else {
+                throw new Error('Ошибка при формировании отчета');
+            }
+        } catch (error) {
+            console.error('Ошибка:', error);
+            alert('Произошла ошибка при формировании отчета. Пожалуйста, попробуйте еще раз.');
+        } finally {
+            window.hideLoader();
+            if (submitButton) {
+                submitButton.disabled = false;
+            }
+        }
+    });
+
+    // Обработчик ошибок
+    window.addEventListener('error', function() {
+        window.hideLoader();
+        const submitButton = form.querySelector('input[type="submit"]');
+        if (submitButton) {
+            submitButton.disabled = false;
+        }
     });
 });
 </script>

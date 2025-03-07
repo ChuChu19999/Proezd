@@ -264,7 +264,6 @@ def analyze_numbers(request):
                     f"Подготовлены индексы для поиска. Длины номеров: {len(ref_data[0])}, Префиксы: {len(ref_data[1])}"
                 )
 
-                # Получаем общее количество записей
                 cursor.execute(
                     f"""
                     SELECT COUNT(*)
@@ -282,12 +281,9 @@ def analyze_numbers(request):
                 processed_records = 0
 
                 # Ограничиваем количество процессов и добавляем тайм-аут
-                num_processes = min(
-                    mp.cpu_count(), 2
-                )  # Уменьшаем максимальное количество процессов
+                num_processes = min(mp.cpu_count(), 2)
                 logger.info(f"Используем {num_processes} процессов для обработки")
 
-                # Обрабатываем данные пакетами
                 while processed_records < total_records:
                     try:
                         cursor.execute(
@@ -471,7 +467,6 @@ def upload_potok(request):
         form = PotokUploadForm(request.POST, request.FILES)
         if form.is_valid():
             try:
-                # Читаем Excel файл с оптимизированными параметрами
                 df = pd.read_excel(
                     request.FILES["file"],
                     engine="openpyxl",
@@ -1715,7 +1710,7 @@ def generate_report(request):
                 open(zip_filepath, "rb"),
                 content_type="application/zip",
                 as_attachment=True,
-                filename="zip_filename",
+                filename=zip_filename,
             )
 
             # Добавляем callback для удаления файлов

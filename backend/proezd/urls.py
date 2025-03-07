@@ -6,9 +6,8 @@ from .admin import admin_site
 router = DefaultRouter()
 
 urlpatterns = [
-    path("api/", include(router.urls)),
-    path("admin/", admin_site.urls),
-    path("admin/upload-potok/", upload_potok, name="upload_potok"),
-    path("admin/upload-propusk/", upload_propusk, name="upload_propusk"),
-    path("admin/generate-report/", generate_report, name="generate_report"),
+    path("", include(router.urls)),
+    path("upload-potok/", upload_potok, name="upload_potok"),
+    path("upload-propusk/", upload_propusk, name="upload_propusk"),
+    path("generate-report/", generate_report, name="generate_report"),
 ]

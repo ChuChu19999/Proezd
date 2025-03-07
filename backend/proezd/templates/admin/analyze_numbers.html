@@ -2,16 +2,36 @@
 {% load static %}
 
 {% block content %}
+{% include "admin/components/loader.html" %}
 <div class="module">
     <h2>Анализ и замена номеров</h2>
     
     {% csrf_token %}
     
-    <div id="results-container" style="margin-top: 20px;">
-        <div id="loading" style="display: none;">
-            <p>Идет анализ номеров...</p>
+    <!-- Модальное окно подтверждения -->
+    <div id="confirmModal" class="modal" style="display: none; position: fixed; z-index: 1000; left: 0; top: 0; width: 100%; height: 100%; background-color: rgba(0,0,0,0.7);">
+        <div class="modal-content" style="background: var(--darkened-bg); margin: 15% auto; padding: 25px; border: 1px solid var(--border-color); width: 80%; max-width: 500px; border-radius: 8px; box-shadow: 0 4px 12px rgba(0,0,0,0.2); color: var(--body-fg);">
+            <h3 style="margin-top: 0; color: var(--header-link-color); font-size: 1.3em;">Подтверждение замены</h3>
+            <p id="confirmMessage" style="margin: 15px 0; font-size: 1.1em;"></p>
+            <div style="text-align: right; margin-top: 25px;">
+                <button class="button" style="background: var(--close-button-bg); color: var(--body-fg); border: 1px solid var(--border-color); padding: 8px 15px; border-radius: 4px; cursor: pointer;" onclick="closeModal()">Отмена</button>
+                <button class="button" style="margin-left: 10px; background: var(--primary); color: white; border: none; padding: 8px 15px; border-radius: 4px; cursor: pointer; font-weight: 500;" onclick="confirmReplacement()">Подтвердить</button>
+            </div>
         </div>
-        
+    </div>
+
+    <!-- Модальное окно успешного обновления -->
+    <div id="successModal" class="modal" style="display: none; position: fixed; z-index: 1000; left: 0; top: 0; width: 100%; height: 100%; background-color: rgba(0,0,0,0.7);">
+        <div class="modal-content" style="background: var(--darkened-bg); margin: 15% auto; padding: 25px; border: 1px solid var(--border-color); width: 80%; max-width: 500px; border-radius: 8px; box-shadow: 0 4px 12px rgba(0,0,0,0.2); color: var(--body-fg);">
+            <h3 style="margin-top: 0; color: var(--header-link-color); font-size: 1.3em;">Успешно!</h3>
+            <p id="successMessage" style="margin: 15px 0; font-size: 1.1em;"></p>
+            <div style="text-align: right; margin-top: 25px;">
+                <button class="button" style="background: var(--primary); color: white; border: none; padding: 8px 15px; border-radius: 4px; cursor: pointer; font-weight: 500;" id="reloadButton">OK</button>
+            </div>
+        </div>
+    </div>
+    
+    <div id="results-container" style="margin-top: 20px;">
         <div id="error" style="display: none; color: red; margin: 10px 0;"></div>
         
         <table id="results-table" style="display: none; width: 100%; margin-top: 20px;">
@@ -39,8 +59,17 @@
 </div>
 
 <script>
+
+function updateSelectedCount() {
+    const selectedCount = document.querySelectorAll('tbody input[type="checkbox"]:checked').length;
+    document.getElementById('selected-count').textContent = selectedCount;
+}
+
+function reloadPage() {
+    window.location.replace(window.location.origin + '/');
+}
+
 document.addEventListener('DOMContentLoaded', function() {
-    const loadingEl = document.getElementById('loading');
     const errorEl = document.getElementById('error');
     const tableEl = document.getElementById('results-table');
     const replaceBtn = document.getElementById('replace-selected');
@@ -48,15 +77,15 @@ document.addEventListener('DOMContentLoaded', function() {
     const selectAllCheckbox = document.getElementById('select-all');
     const selectedCountSpan = document.getElementById('selected-count');
     const csrfToken = document.querySelector('[name=csrfmiddlewaretoken]').value;
-    let sortAscending = false; // По умолчанию сортируем по убыванию
+    let sortAscending = false;
     
-    // Функция обновления счетчика выбранных элементов
-    function updateSelectedCount() {
-        const selectedCount = document.querySelectorAll('tbody input[type="checkbox"]:checked').length;
-        selectedCountSpan.textContent = selectedCount;
-    }
+    let selectedForReplacement = [];
+    const modal = document.getElementById('confirmModal');
+    const successModal = document.getElementById('successModal');
     
-    // Обработчик выбора всех элементов
+    // Обработчик для кнопки OK
+    document.getElementById('reloadButton').addEventListener('click', reloadPage);
+    
     selectAllCheckbox.addEventListener('change', function() {
         const checkboxes = document.querySelectorAll('tbody input[type="checkbox"]');
         checkboxes.forEach(checkbox => {
@@ -65,13 +94,11 @@ document.addEventListener('DOMContentLoaded', function() {
         updateSelectedCount();
     });
     
-    // Функция для загрузки данных с сервера
     function loadData(isSort = false) {
-        loadingEl.style.display = 'block';
+        showLoader();
         errorEl.style.display = 'none';
-        selectAllCheckbox.checked = false; // Сбрасываем общий чекбокс при перезагрузке данных
+        selectAllCheckbox.checked = false;
         
-        // Формируем URL в зависимости от типа запроса
         const url = isSort ? `?sort=true&sort_ascending=${sortAscending}` : '';
         
         fetch(url, {
@@ -89,7 +116,7 @@ document.addEventListener('DOMContentLoaded', function() {
             return response.json();
         })
         .then(data => {
-            loadingEl.style.display = 'none';
+            hideLoader();
             
             if (data.error) {
                 errorEl.textContent = 'Ошибка: ' + data.error;
@@ -110,11 +137,17 @@ document.addEventListener('DOMContentLoaded', function() {
                             <input type="checkbox" data-id="${result.id}" 
                                    data-original="${result.original}" 
                                    data-suggested="${result.suggested}"
-                                   onchange="updateSelectedCount()">
+                                   class="row-checkbox">
                         </td>
                     `;
                     tbody.appendChild(row);
                 });
+                
+                // Обработчики для чекбоксов
+                document.querySelectorAll('.row-checkbox').forEach(checkbox => {
+                    checkbox.addEventListener('change', updateSelectedCount);
+                });
+                
                 tableEl.style.display = 'table';
                 replaceBtn.style.display = 'block';
                 updateSelectedCount();
@@ -124,24 +157,40 @@ document.addEventListener('DOMContentLoaded', function() {
             }
         })
         .catch(error => {
-            loadingEl.style.display = 'none';
+            hideLoader();
             console.error('Ошибка:', error);
             errorEl.textContent = 'Ошибка при загрузке данных: ' + error.message;
             errorEl.style.display = 'block';
         });
     }
     
-    // Обработчик клика по заголовку "Схожесть"
     document.getElementById('similarity-header').addEventListener('click', function() {
         sortAscending = !sortAscending;
         document.getElementById('sort-indicator').textContent = sortAscending ? '▲' : '▼';
-        loadData(true); // Передаем true для указания, что это запрос сортировки
+        loadData(true);
     });
     
-    // Загружаем данные при загрузке страницы
     loadData(false);
     
-    // Обработка нажатия на кнопку замены
+    function showModal(message, onConfirm) {
+        document.getElementById('confirmMessage').textContent = message;
+        modal.style.display = 'block';
+        window.confirmReplacement = function() {
+            modal.style.display = 'none';
+            onConfirm();
+        };
+    }
+    
+    function closeModal() {
+        modal.style.display = 'none';
+        successModal.style.display = 'none';
+    }
+
+    function showSuccessModal(message) {
+        document.getElementById('successMessage').textContent = message;
+        successModal.style.display = 'block';
+    }
+    
     replaceBtn.addEventListener('click', function() {
         const selected = Array.from(document.querySelectorAll('tbody input[type="checkbox"]:checked'))
             .map(cb => ({
@@ -151,59 +200,51 @@ document.addEventListener('DOMContentLoaded', function() {
             }));
             
         if (selected.length === 0) {
-            alert('Выберите номера для замены');
+            showSuccessModal('Выберите номера для замены');
             return;
         }
         
-        if (!confirm(`Вы уверены, что хотите заменить ${selected.length} номеров?`)) {
-            return;
-        }
-        
-        loadingEl.style.display = 'block';
-        replaceBtn.disabled = true;
-        
-        fetch('../replace-numbers/', {
-            method: 'POST',
-            headers: {
-                'Content-Type': 'application/json',
-                'X-CSRFToken': csrfToken
-            },
-            body: JSON.stringify({
-                replacements: selected
-            })
-        })
-        .then(response => {
-            if (!response.ok) {
-                throw new Error(`HTTP error! status: ${response.status}`);
-            }
-            return response.json();
-        })
-        .then(data => {
-            loadingEl.style.display = 'none';
-            replaceBtn.disabled = false;
+        selectedForReplacement = selected;
+        showModal(`Вы уверены, что хотите заменить ${selected.length} номеров?`, function() {
+            showLoader();
+            replaceBtn.disabled = true;
             
-            if (data.error) {
-                errorEl.textContent = 'Ошибка: ' + data.error;
+            fetch('../replace-numbers/', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                    'X-CSRFToken': csrfToken
+                },
+                body: JSON.stringify({
+                    replacements: selectedForReplacement
+                })
+            })
+            .then(response => {
+                if (!response.ok) {
+                    throw new Error(`HTTP error! status: ${response.status}`);
+                }
+                return response.json();
+            })
+            .then(data => {
+                hideLoader();
+                replaceBtn.disabled = false;
+                
+                if (data.error) {
+                    errorEl.textContent = 'Ошибка: ' + data.error;
+                    errorEl.style.display = 'block';
+                } else {
+                    showSuccessModal(data.message);
+                }
+            })
+            .catch(error => {
+                hideLoader();
+                replaceBtn.disabled = false;
+                console.error('Ошибка:', error);
+                errorEl.textContent = 'Ошибка при замене номеров: ' + error.message;
                 errorEl.style.display = 'block';
-            } else {
-                alert(data.message);
-                location.reload();
-            }
-        })
-        .catch(error => {
-            loadingEl.style.display = 'none';
-            replaceBtn.disabled = false;
-            console.error('Ошибка:', error);
-            errorEl.textContent = 'Ошибка при замене номеров: ' + error.message;
-            errorEl.style.display = 'block';
+            });
         });
     });
 });
-
-// Глобальная функция для обновления счетчика (используется в onchange чекбоксов)
-function updateSelectedCount() {
-    const selectedCount = document.querySelectorAll('tbody input[type="checkbox"]:checked').length;
-    document.getElementById('selected-count').textContent = selectedCount;
-}
 </script>
 {% endblock %} 
